@@ -2,21 +2,41 @@
 
 Đây là trái tim của hệ thống, hoạt động bền bỉ, lặp đi lặp lại không ngừng nghỉ để theo dõi "nhịp tim" của 10.000 máy chủ.
 
+## 0. TCP Simulator — "10.000 Server Ảo" Chạy Thật
+
+Trước khi Monitor Service bắt đầu hoạt động, cần hiểu cơ chế giả lập 10.000 server:
+
+**Bài toán:** Bạn lấy đâu ra 10.000 máy chủ thật đang chạy để ping? Không có server thật → TCP luôn fail → 100% Offline → Biểu đồ vô nghĩa.
+
+**Giải pháp: TCP Simulator Service** — Một chương trình Go duy nhất, chạy trong Docker, quản lý 10.000 TCP listeners. Mỗi listener đại diện cho 1 "fake server".
+
+1. Mỗi server được gán 1 port riêng (SRV-00001 → port 9001, SRV-10000 → port 19000).
+2. Cứ mỗi **30 giây**, Math Engine tính toán xem mỗi server nên ON hay OFF:
+   - Dựa trên `uptime_rate` (VD: 0.95 = 95% khả năng ON).
+   - Cộng thêm biến thiên theo hàm Sin theo giờ (tạo pattern trồi sụt ban ngày/ban đêm).
+   - Mỗi server có phase riêng (để không phải tất cả ON/OFF cùng lúc).
+3. Nếu server nên **ON** → **mở TCP port** (chấp nhận kết nối rồi đóng ngay).
+4. Nếu server nên **OFF** → **đóng TCP port** (connection refused).
+
+**Kết quả:** Monitor Service ping TCP tới `tcp-simulator:9001` — nếu port đang mở thì "à, server này ON", nếu bị refused thì "server này OFF". Monitor Service **không hề biết đây là server giả** — code TCPChecker chạy y hệt production.
+
 ## 1. Chuẩn bị (Trước khi chạy)
 
 Bộ máy `monitor-service` sở hữu một Đồng hồ đếm nhịp (Cron Scheduler) được đặt lịch cứ đúng **60 giây (1 phút)** là reo chuông một lần.
 
 Khi chuông reo:
 1. Nó chạy ra hỏi Redis: "Cho tôi xin cái chìa khóa (Lock)". Redis cấp khóa. Nếu có 1 bản sao `monitor-service` thứ 2 cũng chạy ra xin khóa, nó sẽ bị Redis từ chối để đảm bảo chỉ 1 người được làm việc.
-2. Nó kết nối qua Postgres (với quyền đọc chéo Schema), lấy về danh sách toàn bộ 10.000 server đang hoạt động (không bị xóa).
+2. Nó kết nối qua Postgres (với quyền đọc chéo Schema), lấy về danh sách toàn bộ 10.000 server đang hoạt động (không bị xóa). Mỗi server có `ipv4 = "tcp-simulator"` và `tcp_port` riêng (9001–19000).
 
 ## 2. Quá trình "Ping" (Worker Pool)
 
 Thay vì 1 người chạy đi kiểm tra 10.000 nhà, `monitor-service` phái ra **100 công nhân (Workers)** làm việc song song.
-Hệ thống lấy thông tin cấu hình Health-Check của từng server để biết phải dùng cách nào:
 
-- **Nếu cấu hình là TCP**: Công nhân sẽ thử tạo kết nối mạng thực sự (mở TCP Socket) tới địa chỉ IP của server đó. Nếu kết nối thành công trong vòng 5 giây, server được tính là **ON**. Nếu quá 5 giây hoặc bị từ chối kết nối, server bị tính là **OFF**.
-- **Nếu cấu hình là Simulator (Giả lập cho Demo)**: Vì không có 10.000 máy thật, công nhân sẽ nhìn vào tỷ lệ sống `uptime_rate` (VD: 95%). Công nhân sẽ tung một viên xúc xắc. 95% khả năng viên xúc xắc rơi vào ô **ON**, 5% rơi vào ô **OFF**. Để đồ thị trông tự nhiên, hệ thống còn thêm vào một chút nhiễu sóng (tăng giảm tỷ lệ theo giờ trong ngày).
+Tất cả 10.000 servers đều được check bằng **TCP Connect thật**:
+- Công nhân sẽ gọi `net.DialTimeout("tcp", "tcp-simulator:9001", 5s)` — mở kết nối TCP thật tới TCP Simulator Service.
+- Nếu TCP Simulator đang mở port đó (server ON theo toán học): kết nối **thành công** ✅ → server được tính là **ON**.
+- Nếu TCP Simulator đã đóng port đó (server OFF theo toán học): kết nối **bị từ chối** ❌ → server bị tính là **OFF**.
+- Thời gian phản hồi (response time) cũng được đo thật (thường < 5ms trong Docker network).
 
 ## 3. Tổng hợp và Ghi nhận Kết quả (Batch Processing)
 

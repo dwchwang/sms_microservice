@@ -43,4 +43,4 @@ Khi ứng dụng Go kết nối với DB bằng GORM, nó sẽ duy trì một "P
 
 Postgres không phải công cụ vạn năng:
 - **Redis (Ver 8)** được dùng cho dữ liệu siêu nhanh, siêu ngắn hạn: Rate Limiting, Distributed Lock (Khóa phân tán), JWT Blacklist, Caching API.
-- **Elasticsearch (Ver 8)** được dùng cho dữ liệu Log cực lớn (Time-series data). Mỗi phút 10.000 server sinh ra 10.000 bản ghi status. 1 ngày là 14.4 triệu bản ghi. Đổ dữ liệu này vào Postgres sẽ làm nó phình to và chậm chạp. Elasticsearch sinh ra để giải quyết bài toán index và aggregate (tính toán thống kê) dữ liệu log khổng lồ này với tốc độ mili-giây.
+- **Elasticsearch (Ver 8)** được dùng cho dữ liệu Log cực lớn (Time-series data). Mỗi phút 10.000 server sinh ra 10.000 bản ghi status. Khi chạy liên tục 24/24, 1 ngày có thể lên tới 14.4 triệu bản ghi. Ở chế độ demo (chỉ chạy khi bật hệ thống), số lượng bản ghi sẽ tỷ lệ thuận với thời gian chạy thực tế. Đổ dữ liệu này vào Postgres sẽ làm nó phình to và chậm chạp. Elasticsearch sinh ra để giải quyết bài toán index và aggregate (tính toán thống kê) dữ liệu log khổng lồ này với tốc độ mili-giây.

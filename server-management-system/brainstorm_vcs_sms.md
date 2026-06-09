@@ -70,7 +70,7 @@
 
 | # | Câu hỏi | Quyết định | Lý do |
 |---|---------|------------|-------|
-| 1 | **Health-check Method** | **Hybrid: TCP Connect + Simulator** | TCP Connect cho server thật, Simulator giả lập uptime_rate cho demo. Có toggle qua config để chuyển mode. Dữ liệu trồi sụt real-time cho ES |
+| 1 | **Health-check Method** | **TCP Simulator Pool** | 1 service Go (`tcp-simulator`) quản lý 10.000 TCP listeners, mở/đóng port động theo công thức toán học (uptime_rate + sin wave). Monitor Service dùng TCP Connect thật (`net.DialTimeout`) ping tới các port này. Kết hợp được cả dữ liệu trồi sụt realistic lẫn kiểm chứng TCP code thật |
 | 2 | **API Gateway** | **Tự viết bằng Gin** | Full control JWT Middleware, Rate Limiting, Reverse Proxy. Hệ sinh thái gọn nhẹ, không phụ thuộc Kong/Traefik |
 | 3 | **Email Provider** | **Gmail SMTP + App Password** | Gửi email thật, cấu hình qua `.env`, đủ quota cho demo, bảo mật App Password |
 | 4 | **Repo Structure** | **Monorepo** | Quản lý tập trung, shared libs dễ dàng, 1 `docker-compose.yml` cho toàn bộ |
@@ -99,6 +99,10 @@ graph TB
         MONITOR["Monitor Service<br/>Port: 8083<br/>Schema: monitor_schema"]
         REPORT["Report Service<br/>Port: 8084<br/>Schema: report_schema"]
         FILEIO["File I/O Service<br/>Port: 8085<br/>Schema: fileio_schema"]
+    end
+
+    subgraph "Infrastructure Simulator"
+        TCPSIM["TCP Simulator<br/>Ports: 9001–19000<br/>10.000 Fake Servers<br/>On/Off theo Math Engine"]
     end
 
     subgraph "Message Broker"
@@ -133,6 +137,7 @@ graph TB
     MONITOR --> REDIS
     MONITOR --> KAFKA
     MONITOR --> ES
+    MONITOR -.->|"TCP Connect<br/>net.DialTimeout"| TCPSIM
 
     REPORT --> PG
     REPORT --> ES
@@ -149,9 +154,10 @@ graph TB
 |---------|--------|-------------|------------|
 | **Auth Service** | `auth_schema` | `users`, `roles`, `role_permissions` | Redis |
 | **Server Service** | `server_schema` | `servers` | Redis, Kafka |
-| **Monitor Service** | `monitor_schema` | `health_check_configs` | Redis, Kafka, ES, (đọc `server_schema.servers`) |
+| **Monitor Service** | `monitor_schema` | `health_check_configs` | Redis, Kafka, ES, TCP Simulator, (đọc `server_schema.servers`) |
 | **Report Service** | `report_schema` | `report_jobs`, `daily_snapshots` | ES, Kafka, Gmail SMTP |
 | **File I/O Service** | `fileio_schema` | `import_jobs`, `import_job_details` | Kafka, (đọc/ghi `server_schema.servers`) |
+| **TCP Simulator** | _(không có schema)_ | _(không có bảng)_ | Standalone — chỉ mở/đóng TCP ports |
 
 > [!WARNING]
 > **Cross-schema access**: Monitor Service và File I/O Service cần đọc/ghi bảng `servers` thuộc `server_schema`. Trong môi trường microservice lý tưởng, nên giao tiếp qua API. Tuy nhiên, với Shared Instance approach, ta cho phép **cross-schema read** qua GRANT SELECT và ghi thông qua **Kafka event** → Server Service xử lý write. Điều này giữ write ownership tại Server Service.
@@ -252,10 +258,10 @@ GET /api/v1/servers?status=on&server_name=web&ipv4=192.168&sort_by=created_at&so
 
 ### 📡 4.4. Monitor Service (`monitor-service`)
 
-**Trách nhiệm:** Health-check định kỳ 10.000 server (Hybrid TCP + Simulator), ghi trạng thái vào ES, cập nhật status trên PG.
+**Trách nhiệm:** Health-check định kỳ 10.000 server bằng TCP Connect thật, ghi trạng thái vào ES, cập nhật status trên PG.
 
 > [!IMPORTANT]
-> Đây là service **quan trọng nhất** (2.0 điểm). Sử dụng hybrid approach: TCP Connect cho server có IP thật + Simulator cho demo.
+> Đây là service **quan trọng nhất** (2.0 điểm). Sử dụng TCP Connect thật tới `tcp-simulator` service — nơi mở/đóng 10.000 port theo công thức toán học.
 
 | Thành phần | Chi tiết |
 |------------|---------|
@@ -264,57 +270,41 @@ GET /api/v1/servers?status=on&server_name=web&ipv4=192.168&sort_by=created_at&so
 | **Cache** | Redis — cache status hiện tại, distributed lock |
 | **Kafka** | Consume: `server.created/updated/deleted`. Publish: `server.status.changed`, `server.health.batch` |
 | **Scheduler** | Cron job mỗi **60 giây** |
+| **Health-check Target** | `tcp-simulator` service (10.000 TCP listeners trên port 9001–19000) |
 
-**Hybrid Health-Check Strategy:**
+**TCP Health-Check Strategy:**
+
+> [!NOTE]
+> Monitor Service **chỉ dùng TCP Connect** — không có Simulator mode nào trong code Monitor Service. Trạng thái On/Off được điều khiển bởi `tcp-simulator` service (mở/đóng port theo toán học). Monitor Service chỉ biết: "Nếu TCP connect thành công → ON, nếu bị refused → OFF".
 
 ```go
-// Interface HealthChecker — Strategy Pattern
-type HealthChecker interface {
-    Check(ctx context.Context, server *Server) *HealthResult
-}
-
-// TCP Connect Checker — cho server thật
+// TCP Connect Checker — check thật tới tcp-simulator
 type TCPChecker struct {
     Timeout time.Duration // default: 5s
-    Port    int           // default: 80 hoặc từ config
 }
 
 func (c *TCPChecker) Check(ctx context.Context, server *Server) *HealthResult {
-    addr := fmt.Sprintf("%s:%d", server.IPv4, c.Port)
-    conn, err := net.DialTimeout("tcp", addr, c.Timeout)
-    if err != nil {
-        return &HealthResult{Status: "off", ResponseTimeMs: 0}
-    }
-    defer conn.Close()
-    return &HealthResult{Status: "on", ResponseTimeMs: elapsed}
-}
-
-// Simulator Checker — cho demo, tạo dữ liệu trồi sụt
-type SimulatorChecker struct{}
-
-func (c *SimulatorChecker) Check(ctx context.Context, server *Server) *HealthResult {
-    // Dùng uptime_rate từ config (VD: 0.95 = 95% khả năng ON)
-    // Thêm biến thiên theo giờ để tạo pattern realistic
-    baseRate := server.HealthCheckConfig.UptimeRate  // 0.0 ~ 1.0
-    hourlyVariation := math.Sin(float64(time.Now().Hour()) * math.Pi / 12) * 0.05
-    effectiveRate := math.Max(0, math.Min(1, baseRate + hourlyVariation))
+    port := server.HealthCheckConfig.TCPPort  // 9001..19000
+    addr := fmt.Sprintf("%s:%d", server.IPv4, port)
+    // server.IPv4 = "tcp-simulator" (Docker DNS resolve)
     
-    if rand.Float64() < effectiveRate {
+    start := time.Now()
+    conn, err := net.DialTimeout("tcp", addr, c.Timeout)
+    elapsed := time.Since(start).Milliseconds()
+    
+    if err != nil {
         return &HealthResult{
-            Status:         "on",
-            ResponseTimeMs: rand.Intn(50) + 5, // 5-55ms
-            CheckMethod:    "simulator",
+            Status:         "off",
+            ResponseTimeMs: 0,
+            CheckMethod:    "tcp",
         }
     }
-    return &HealthResult{Status: "off", ResponseTimeMs: 0, CheckMethod: "simulator"}
-}
-
-// Factory — chọn checker theo config
-func NewHealthChecker(cfg *Config) HealthChecker {
-    if cfg.Monitor.Mode == "tcp" {
-        return &TCPChecker{Timeout: cfg.Monitor.TCPTimeout}
+    defer conn.Close()
+    return &HealthResult{
+        Status:         "on",
+        ResponseTimeMs: int(elapsed),
+        CheckMethod:    "tcp",
     }
-    return &SimulatorChecker{}
 }
 ```
 
@@ -409,7 +399,188 @@ func (s *MonitorService) RunHealthCheckCycle(ctx context.Context) error {
 
 ---
 
-### 📊 4.5. Report Service (`report-service`)
+### 🖥️ 4.5. TCP Simulator Service (`tcp-simulator`)
+
+**Trách nhiệm:** Giả lập 10.000 server vật lý bằng cách mở/đóng TCP port động theo công thức toán học. Đây là service hạ tầng hỗ trợ, **không nằm trong business logic** — chỉ phục vụ mục đích tạo ra môi trường để Monitor Service có thể ping TCP thật.
+
+> [!IMPORTANT]
+> Service này giải quyết bài toán: "Lấy đâu ra 10.000 IP/Port thật để test TCP?" bằng cách tạo 10.000 TCP listeners trong 1 container duy nhất.
+
+| Thành phần | Chi tiết |
+|------------|---------|
+| **Ngôn ngữ** | Go (cùng stack với hệ thống) |
+| **Port range** | 9001–19000 (10.000 ports) |
+| **Tick interval** | 30 giây — đánh giá lại trạng thái On/Off mỗi server |
+| **Logic On/Off** | Công thức toán học: `uptime_rate` + sin wave hourly + server-specific phase |
+| **RAM** | ~100–256MB cho 10.000 listeners |
+| **Docker hostname** | `tcp-simulator` (Docker DNS nội bộ) |
+
+**Mapping Port:**
+```
+Server SRV-00001 → tcp-simulator:9001
+Server SRV-00002 → tcp-simulator:9002
+...
+Server SRV-10000 → tcp-simulator:19000
+
+Công thức: Port = 9000 + server_index
+```
+
+**Math Engine — Điều khiển On/Off theo toán học:**
+
+```go
+// math_engine.go — Quyết định server nên ON hay OFF tại thời điểm hiện tại
+
+type MathEngine struct{}
+
+func (e *MathEngine) ShouldBeOnline(uptimeRate float64, serverIndex int) bool {
+    // 1. Base rate từ config (VD: 0.95 = 95%)
+    baseRate := uptimeRate
+
+    // 2. Hourly variation — sin wave tạo pattern trồi sụt theo giờ
+    hour := float64(time.Now().Hour())
+    hourlyVariation := math.Sin(hour * math.Pi / 12) * 0.05
+
+    // 3. Server-specific offset — mỗi server có phase khác nhau
+    //    để không phải tất cả cùng On/Off 1 lúc
+    serverPhase := float64(serverIndex) * 0.1
+    serverVariation := math.Sin((hour+serverPhase) * math.Pi / 24) * 0.02
+
+    // 4. Tính effective rate
+    effectiveRate := math.Max(0, math.Min(1, baseRate + hourlyVariation + serverVariation))
+
+    // 5. Random roll — quyết định On hay Off
+    return rand.Float64() < effectiveRate
+}
+```
+
+**Listener Manager — Mở/Đóng Port Động:**
+
+```go
+// manager.go — Quản lý 10.000 TCP listeners
+
+type SimulatorManager struct {
+    servers     map[int]*FakeServer  // index -> listener
+    mathEngine  *MathEngine
+    basePort    int                  // 9000
+    numServers  int                  // 10000
+    tickInterval time.Duration       // 30s
+}
+
+type FakeServer struct {
+    Index      int
+    Port       int
+    UptimeRate float64
+    listener   net.Listener
+    isOnline   bool
+    mu         sync.Mutex
+}
+
+// Vòng lặp chính: cứ mỗi 30 giây, đánh giá lại trạng thái mỗi server
+func (m *SimulatorManager) RunControlLoop(ctx context.Context) {
+    ticker := time.NewTicker(m.tickInterval)
+    defer ticker.Stop()
+    
+    // Khởi tạo lần đầu
+    m.evaluateAllServers()
+
+    for {
+        select {
+        case <-ctx.Done():
+            m.shutdownAll()
+            return
+        case <-ticker.C:
+            m.evaluateAllServers()
+        }
+    }
+}
+
+func (m *SimulatorManager) evaluateAllServers() {
+    var wg sync.WaitGroup
+    sem := make(chan struct{}, 200) // limit concurrent open/close
+
+    for _, server := range m.servers {
+        wg.Add(1)
+        sem <- struct{}{}
+        go func(s *FakeServer) {
+            defer wg.Done()
+            defer func() { <-sem }()
+
+            shouldBeOn := m.mathEngine.ShouldBeOnline(s.UptimeRate, s.Index)
+
+            if shouldBeOn && !s.isOnline {
+                s.StartListening()    // Mở port → TCP ping sẽ thành công
+            } else if !shouldBeOn && s.isOnline {
+                s.StopListening()     // Đóng port → TCP ping sẽ fail (connection refused)
+            }
+        }(server)
+    }
+    wg.Wait()
+}
+
+// StartListening — mở TCP port, accept connections rồi đóng ngay
+func (s *FakeServer) StartListening() {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+
+    ln, err := net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+    if err != nil {
+        return
+    }
+    s.listener = ln
+    s.isOnline = true
+
+    // Accept loop: chấp nhận rồi đóng ngay (đủ cho TCP health-check)
+    go func() {
+        for {
+            conn, err := ln.Accept()
+            if err != nil {
+                return // listener closed
+            }
+            conn.Close()
+        }
+    }()
+}
+
+// StopListening — đóng TCP port → connection refused
+func (s *FakeServer) StopListening() {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+
+    if s.listener != nil {
+        s.listener.Close()
+        s.listener = nil
+    }
+    s.isOnline = false
+}
+```
+
+**Cách hoạt động tổng thể:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Docker Network: vcs-network                                 │
+│                                                              │
+│  ┌──────────────────┐     TCP Connect     ┌───────────────┐ │
+│  │  Monitor Service │ ──────────────────▶ │ TCP Simulator │ │
+│  │  (port 8083)     │  tcp-simulator:9001 │ Service       │ │
+│  │                  │  tcp-simulator:9002 │               │ │
+│  │  TCPChecker:     │  ...               │ 10.000        │ │
+│  │  net.DialTimeout │  tcp-simulator:19000│ Listeners     │ │
+│  │  ("tcp", addr,   │                    │ On/Off theo   │ │
+│  │   5s)            │ ◀──────────────── │ Math Engine   │ │
+│  │                  │  Accept ✅ / Refuse ❌│               │ │
+│  └──────────────────┘                     └───────────────┘ │
+│                                                              │
+│  Math Engine (mỗi 30s):                                      │
+│  effectiveRate = uptimeRate + sin(hour*π/12)*0.05            │
+│                + sin((hour+phase)*π/24)*0.02                 │
+│  shouldBeOn = random() < effectiveRate                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 📊 4.6. Report Service (`report-service`)
 
 **Trách nhiệm:** Tính toán uptime từ ES, tạo báo cáo, gửi email qua Gmail SMTP, cron daily report.
 
@@ -459,7 +630,7 @@ Uptime(trung bình) = AVG(Uptime của tất cả servers)
 
 ---
 
-### 📁 4.6. File I/O Service (`fileio-service`)
+### 📁 4.7. File I/O Service (`fileio-service`)
 
 **Trách nhiệm:** Import/Export danh sách server từ/ra file Excel (.xlsx). Xử lý bất đồng bộ qua Kafka.
 
@@ -734,7 +905,7 @@ erDiagram
 CREATE TABLE monitor_schema.health_check_configs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     server_id       VARCHAR(100)  NOT NULL UNIQUE, -- FK logic tới server_schema.servers.server_id
-    check_method    VARCHAR(20)   NOT NULL DEFAULT 'simulator' CHECK (check_method IN ('tcp', 'simulator')),
+    check_method    VARCHAR(20)   NOT NULL DEFAULT 'tcp' CHECK (check_method IN ('tcp', 'simulator')),
     tcp_port        INTEGER       DEFAULT 80,
     tcp_timeout_ms  INTEGER       DEFAULT 5000,
     uptime_rate     DECIMAL(3,2)  DEFAULT 0.95 CHECK (uptime_rate >= 0 AND uptime_rate <= 1),
@@ -749,7 +920,77 @@ CREATE INDEX idx_hc_configs_enabled ON monitor_schema.health_check_configs(is_en
 
 ---
 
-### 5.4. Schema: `report_schema`
+### 5.4. Seed Data — 10.000 Servers cho TCP Simulator
+
+> [!NOTE]
+> Script này tạo 10.000 server records trong DB với `ipv4 = 'tcp-simulator'` (Docker hostname) và `tcp_port` mapping tương ứng. Chạy sau khi init schemas.
+
+```sql
+-- deployments/docker/postgres/seed_10k_servers.sql
+-- Tạo 10.000 servers trỏ tới tcp-simulator container
+
+DO $$
+DECLARE
+    i INTEGER;
+    uptime DECIMAL(3,2);
+    categories TEXT[] := ARRAY['web', 'db', 'cache', 'api', 'worker', 'proxy', 'storage', 'monitor', 'queue', 'ml'];
+    locations TEXT[] := ARRAY['DC-HN', 'DC-HCM', 'DC-DN', 'DC-HP', 'DC-CT'];
+    os_list TEXT[] := ARRAY['Ubuntu 22.04', 'Ubuntu 24.04', 'CentOS 9', 'Debian 12', 'RHEL 9'];
+BEGIN
+    FOR i IN 1..10000 LOOP
+        -- Uptime rate phân bố đa dạng:
+        -- 70% servers: uptime 0.93-0.99 (tốt)
+        -- 20% servers: uptime 0.80-0.93 (trung bình)
+        -- 10% servers: uptime 0.50-0.80 (kém)
+        IF i % 10 = 0 THEN
+            uptime := 0.50 + (random() * 0.30);          -- 50-80%
+        ELSIF i % 5 = 0 THEN
+            uptime := 0.80 + (random() * 0.13);          -- 80-93%
+        ELSE
+            uptime := 0.93 + (random() * 0.06);          -- 93-99%
+        END IF;
+
+        -- Insert server
+        INSERT INTO server_schema.servers
+            (server_id, server_name, status, ipv4, os, cpu_cores, ram_gb, disk_gb, location, description)
+        VALUES (
+            'SRV-' || LPAD(i::TEXT, 5, '0'),
+            categories[1 + (i % 10)] || '-' || LPAD(((i-1)/10 + 1)::TEXT, 4, '0'),
+            'off',
+            'tcp-simulator',   -- Docker hostname, TCP Simulator sẽ resolve
+            os_list[1 + (i % 5)],
+            CASE WHEN i % 3 = 0 THEN 16 WHEN i % 3 = 1 THEN 8 ELSE 4 END,
+            CASE WHEN i % 3 = 0 THEN 64 WHEN i % 3 = 1 THEN 32 ELSE 16 END,
+            CASE WHEN i % 3 = 0 THEN 2000 WHEN i % 3 = 1 THEN 1000 ELSE 500 END,
+            locations[1 + (i % 5)],
+            'Auto-generated server #' || i
+        );
+
+        -- Insert health check config
+        INSERT INTO monitor_schema.health_check_configs
+            (server_id, check_method, tcp_port, tcp_timeout_ms, uptime_rate)
+        VALUES (
+            'SRV-' || LPAD(i::TEXT, 5, '0'),
+            'tcp',                       -- Dùng TCP mode
+            9000 + i,                    -- Port mapping: SRV-00001 → 9001
+            5000,
+            uptime
+        );
+    END LOOP;
+END $$;
+```
+
+**Phân bố Uptime Rate:**
+
+| Nhóm | Tỷ lệ | Uptime Range | Ví dụ |
+|------|--------|-------------|-------|
+| Tốt | 70% (7.000 servers) | 93%–99% | Web servers, API gateways |
+| Trung bình | 20% (2.000 servers) | 80%–93% | Dev servers, testing nodes |
+| Kém | 10% (1.000 servers) | 50%–80% | Legacy systems, unstable nodes |
+
+---
+
+### 5.5. Schema: `report_schema`
 
 ```sql
 -- report_schema.report_jobs
@@ -799,7 +1040,7 @@ CREATE UNIQUE INDEX idx_daily_snapshots_date ON report_schema.daily_snapshots(sn
 
 ---
 
-### 5.5. Schema: `fileio_schema`
+### 5.6. Schema: `fileio_schema`
 
 ```sql
 -- fileio_schema.import_jobs
@@ -875,7 +1116,7 @@ erDiagram
 
 ---
 
-### 5.6. Tổng quan ERD toàn hệ thống
+### 5.7. Tổng quan ERD toàn hệ thống
 
 ```mermaid
 erDiagram
@@ -1118,14 +1359,21 @@ sequenceDiagram
     
     alt Lock acquired
         Monitor->>PG: SELECT * FROM server_schema.servers<br/>WHERE deleted_at IS NULL
-        PG-->>Monitor: 10,000 servers
+        PG-->>Monitor: 10,000 servers (ipv4="tcp-simulator")
         
         Monitor->>Monitor: Spawn 100 Worker Goroutines
         
         rect rgb(230, 245, 255)
             Note over Monitor: Worker Pool xử lý song song
             loop Mỗi server (fan-out qua channel)
-                Monitor->>Monitor: HealthChecker.Check(server)<br/>TCP Connect hoặc Simulator
+                Monitor->>Monitor: TCPChecker.Check(server)<br/>net.DialTimeout("tcp", "tcp-simulator:port", 5s)
+                
+                alt Port đang mở (tcp-simulator: server ON)
+                    Monitor->>Monitor: HealthResult{Status: "on"}
+                else Port đang đóng (tcp-simulator: server OFF)
+                    Monitor->>Monitor: HealthResult{Status: "off"}
+                end
+                
                 Monitor->>Redis: GET server:status:{server_id}
                 Redis-->>Monitor: old_status
                 
@@ -1439,7 +1687,7 @@ sequenceDiagram
     "server_id": "SRV-001",
     "old_status": "on",
     "new_status": "off",
-    "check_method": "simulator",
+    "check_method": "tcp",
     "response_time_ms": 0
   }
 }
@@ -1867,9 +2115,7 @@ vcs-sms/
 │       ├── checker/
 │       │   ├── checker.go               # HealthChecker interface
 │       │   ├── tcp_checker.go           # TCP Connect impl
-│       │   ├── tcp_checker_test.go
-│       │   ├── simulator_checker.go     # Simulator impl
-│       │   └── simulator_checker_test.go
+│       │   └── tcp_checker_test.go
 │       ├── worker/
 │       │   ├── pool.go                  # Worker pool pattern
 │       │   └── pool_test.go
@@ -1946,6 +2192,18 @@ vcs-sms/
 │       └── dto/
 │           └── response.go
 │
+├── tcp-simulator/                       # ── TCP Simulator Service ──
+│   ├── Dockerfile
+│   ├── go.mod / go.sum
+│   ├── cmd/
+│   │   └── main.go                      # Entry point
+│   └── simulator/
+│       ├── manager.go                   # Quản lý 10.000 listeners
+│       ├── listener.go                  # FakeServer struct
+│       ├── math_engine.go               # Công thức toán học On/Off
+│       ├── math_engine_test.go
+│       └── config.go                    # Load server configs
+│
 ├── shared/                              # ── Shared Libraries ──
 │   ├── go.mod
 │   ├── kafka/
@@ -1966,7 +2224,8 @@ vcs-sms/
 ├── deployments/                         # ── Deployment Configs ──
 │   ├── docker/
 │   │   ├── postgres/
-│   │   │   └── init.sql               # Create schemas + seed data
+│   │   │   ├── init.sql               # Create schemas + grants
+│   │   │   └── seed_10k_servers.sql   # Seed 10.000 servers cho TCP Simulator
 │   │   ├── elasticsearch/
 │   │   │   └── mapping.json           # Index mapping
 │   │   └── kafka/
@@ -2147,6 +2406,33 @@ services:
     networks:
       - vcs-network
 
+  # ═══════════════════════════════════════
+  # TCP Simulator (Fake 10.000 Servers)
+  # ═══════════════════════════════════════
+
+  tcp-simulator:
+    build:
+      context: .
+      dockerfile: tcp-simulator/Dockerfile
+    container_name: vcs-sms-tcp-simulator
+    networks:
+      - vcs-network
+    environment:
+      - SIMULATOR_BASE_PORT=9001
+      - SIMULATOR_NUM_SERVERS=10000
+      - SIMULATOR_TICK_INTERVAL=30s
+      - SIMULATOR_DEFAULT_UPTIME_RATE=0.95
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1.0'
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9001"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   auth-service:
     build:
       context: .
@@ -2204,6 +2490,8 @@ services:
       elasticsearch:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      tcp-simulator:
         condition: service_healthy
     volumes:
       - ./logs/monitor:/var/log/vcs-sms
@@ -2344,9 +2632,13 @@ SMTP_ADMIN_EMAIL=admin@company.com       # Default recipient for daily reports
 # ── Monitor Service ──
 MONITOR_CHECK_INTERVAL=60          # seconds
 MONITOR_WORKER_COUNT=100
-MONITOR_CHECK_MODE=simulator       # "tcp" or "simulator"
 MONITOR_TCP_TIMEOUT=5000           # ms
-MONITOR_DEFAULT_UPTIME_RATE=0.95   # 0.0 ~ 1.0
+
+# ── TCP Simulator ──
+SIMULATOR_BASE_PORT=9001
+SIMULATOR_NUM_SERVERS=10000
+SIMULATOR_TICK_INTERVAL=30s        # đánh giá lại trạng thái On/Off mỗi 30s
+SIMULATOR_DEFAULT_UPTIME_RATE=0.95 # 0.0 ~ 1.0
 
 # ── Report Service ──
 REPORT_DAILY_CRON=0 8 * * *       # 08:00 AM daily
@@ -2374,6 +2666,7 @@ LOG_COMPRESS=true
 | **Elasticsearch** | 8.12 | Status logs, uptime aggregation |
 | **Apache Kafka** | 3.9 (KRaft, no Zookeeper) | Event-driven messaging giữa services |
 | **Docker & Compose** | 3.8 | Containerization |
+| **TCP Simulator** | Custom (Go) | Giả lập 10.000 server bằng TCP listeners, On/Off theo Math Engine |
 | **swaggo/swag** | latest | OpenAPI/Swagger auto-gen |
 | **excelize** | v2 | Excel import/export (.xlsx) |
 | **zerolog** | latest | Structured JSON logging |
@@ -2398,12 +2691,14 @@ LOG_COMPRESS=true
 > Quy trình: **Design First** → DB Schema → OpenAPI → Sequence Diagrams → Code → Test → Deploy
 
 ### Phase 0: Foundation & Design (Tuần 1)
-- [x] Brainstorm & quyết định thiết kế ← **ĐANG Ở ĐÂY**
+- [x] Brainstorm & quyết định thiết kế ← **ĐÃ XONG**
 - [ ] Hoàn thiện DB schema SQL scripts (init.sql + migrations)
+- [ ] Viết seed script 10.000 servers (seed_10k_servers.sql)
 - [ ] Viết OpenAPI spec (swagger.yaml) đầy đủ cho 15 endpoints
 - [ ] Vẽ sequence diagrams (đã có trong brainstorm)
 - [ ] Setup monorepo structure + docker-compose.yml
 - [ ] Setup shared module (logger, response, kafka, errors)
+- [ ] Setup TCP Simulator service (tcp-simulator/)
 
 ### Phase 1: Auth + Server Service (Tuần 2)
 - [ ] Auth Service: register, login, refresh, logout, JWT
@@ -2411,9 +2706,10 @@ LOG_COMPRESS=true
 - [ ] API Gateway: routing, JWT middleware, rate limiting
 - [ ] Unit tests cho Phase 1 (target ≥ 90%)
 
-### Phase 2: Monitor Service (Tuần 3)
+### Phase 2: Monitor Service + TCP Simulator (Tuần 3)
+- [ ] TCP Simulator: math engine, listener manager, control loop
 - [ ] Monitor Service: health-check scheduler, worker pool
-- [ ] Hybrid TCP + Simulator checker
+- [ ] TCP Connect checker (ping tới tcp-simulator)
 - [ ] Elasticsearch bulk indexing
 - [ ] Kafka producer/consumer integration
 - [ ] Unit tests cho Phase 2

@@ -6,11 +6,12 @@ Tài liệu này giải thích lý do đằng sau các quyết định kiến tr
 
 Với một hệ thống quản lý 10.000 server, tải trọng (workload) của các chức năng là rất khác nhau:
 - **Monitor Service**: Hoạt động liên tục, định kỳ mỗi phút quét 10.000 server. Đây là service chịu tải tính toán (CPU) và mạng (Network I/O) nặng nhất.
+- **TCP Simulator Service**: Service hạ tầng hỗ trợ, quản lý 10.000 TCP listeners, mở/đóng port động theo công thức toán học để tạo mục tiêu cho Monitor Service ping TCP thật. Đây không phải business service mà là công cụ giả lập server vật lý.
 - **Server Service (CRUD)**: Tải thấp, chỉ thỉnh thoảng có thao tác thêm/sửa/xóa từ người dùng.
 - **Report & File I/O**: Tải bất chợt (spiky workload), cần nhiều RAM để parse/gen file Excel hoặc gom dữ liệu lớn.
 
 **Lợi ích khi chia Microservice:**
-- **Mở rộng độc lập (Independent Scaling)**: Khi số lượng server tăng lên 50.000, ta chỉ cần scale (tăng số lượng instance) cho `Monitor Service` mà không cần cấp thêm RAM/CPU lãng phí cho `Auth` hay `File I/O`.
+- **Mở rộng độc lập (Independent Scaling)**: Khi số lượng server tăng lên 50.000, ta chỉ cần scale (tăng số lượng instance) cho `Monitor Service` và `TCP Simulator` mà không cần cấp thêm RAM/CPU lãng phí cho `Auth` hay `File I/O`.
 - **Cô lập lỗi (Fault Isolation)**: Nếu tính năng Import Excel bị lỗi out-of-memory và crash service, nó chỉ làm sập `File I/O Service`. Monitor Service vẫn tiếp tục ping server bình thường, hệ thống cốt lõi không bị ảnh hưởng.
 - **Bảo mật**: `Auth Service` chứa logic nhạy cảm về mật khẩu có thể được bảo vệ chặt chẽ, các service khác không hề biết cấu trúc bảng Users.
 
