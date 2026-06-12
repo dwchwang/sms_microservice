@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS auth_schema.role_permissions (
     UNIQUE(role_id, scope)
 );
 
-CREATE INDEX IF NOT EXISTS idx_role_permissions_role_id 
+CREATE INDEX IF NOT EXISTS idx_role_permissions_role_id
     ON auth_schema.role_permissions(role_id);
 
 CREATE TABLE IF NOT EXISTS auth_schema.users (
@@ -94,11 +94,11 @@ CREATE TABLE IF NOT EXISTS auth_schema.users (
     deleted_at      TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_username 
+CREATE INDEX IF NOT EXISTS idx_users_username
     ON auth_schema.users(username) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_users_email 
+CREATE INDEX IF NOT EXISTS idx_users_email
     ON auth_schema.users(email) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_users_role_id 
+CREATE INDEX IF NOT EXISTS idx_users_role_id
     ON auth_schema.users(role_id);
 
 -- Seed roles
@@ -108,7 +108,7 @@ INSERT INTO auth_schema.roles (id, name, description) VALUES
     ('a0000000-0000-0000-0000-000000000003', 'viewer',   'Read-only access')
 ON CONFLICT (name) DO NOTHING;
 
--- Seed admin permissions (9 scopes)
+-- Seed role permissions (10 scopes for admin)
 INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
     ('a0000000-0000-0000-0000-000000000001', 'server:create'),
     ('a0000000-0000-0000-0000-000000000001', 'server:read'),
@@ -116,17 +116,32 @@ INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
     ('a0000000-0000-0000-0000-000000000001', 'server:delete'),
     ('a0000000-0000-0000-0000-000000000001', 'server:import'),
     ('a0000000-0000-0000-0000-000000000001', 'server:export'),
+    ('a0000000-0000-0000-0000-000000000001', 'monitor:view'),
     ('a0000000-0000-0000-0000-000000000001', 'report:view'),
     ('a0000000-0000-0000-0000-000000000001', 'report:send'),
     ('a0000000-0000-0000-0000-000000000001', 'user:manage'),
-    -- Operator permissions (3 scopes)
+    -- Operator permissions (4 scopes)
     ('a0000000-0000-0000-0000-000000000002', 'server:read'),
     ('a0000000-0000-0000-0000-000000000002', 'server:update'),
+    ('a0000000-0000-0000-0000-000000000002', 'monitor:view'),
     ('a0000000-0000-0000-0000-000000000002', 'report:view'),
-    -- Viewer permissions (2 scopes)
+    -- Viewer permissions (3 scopes)
     ('a0000000-0000-0000-0000-000000000003', 'server:read'),
+    ('a0000000-0000-0000-0000-000000000003', 'monitor:view'),
     ('a0000000-0000-0000-0000-000000000003', 'report:view')
 ON CONFLICT (role_id, scope) DO NOTHING;
+
+-- Seed default admin account (password: Admin@123456)
+INSERT INTO auth_schema.users (id, username, email, password_hash, full_name, role_id, is_active)
+VALUES (
+    'b0000000-0000-0000-0000-000000000001',
+    'admin',
+    'admin@vcs.com',
+    '$2a$10$95QUyF2JLw7SJwUBrw80BO1BipqhRz7iQQF/TUlga.Z/ohFK9UlOi',
+    'System Administrator',
+    'a0000000-0000-0000-0000-000000000001',
+    TRUE
+) ON CONFLICT (username) DO NOTHING;
 
 -- ============================
 -- server_schema tables
@@ -149,17 +164,17 @@ CREATE TABLE IF NOT EXISTS server_schema.servers (
     deleted_at      TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_servers_server_id 
+CREATE INDEX IF NOT EXISTS idx_servers_server_id
     ON server_schema.servers(server_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_servers_server_name 
+CREATE INDEX IF NOT EXISTS idx_servers_server_name
     ON server_schema.servers(server_name) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_servers_status 
+CREATE INDEX IF NOT EXISTS idx_servers_status
     ON server_schema.servers(status) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_servers_ipv4 
+CREATE INDEX IF NOT EXISTS idx_servers_ipv4
     ON server_schema.servers(ipv4) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_servers_created_at 
+CREATE INDEX IF NOT EXISTS idx_servers_created_at
     ON server_schema.servers(created_at) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_servers_status_created 
+CREATE INDEX IF NOT EXISTS idx_servers_status_created
     ON server_schema.servers(status, created_at DESC) WHERE deleted_at IS NULL;
 
 -- ============================
@@ -178,9 +193,9 @@ CREATE TABLE IF NOT EXISTS monitor_schema.health_check_configs (
     updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_hc_configs_server_id 
+CREATE INDEX IF NOT EXISTS idx_hc_configs_server_id
     ON monitor_schema.health_check_configs(server_id);
-CREATE INDEX IF NOT EXISTS idx_hc_configs_enabled 
+CREATE INDEX IF NOT EXISTS idx_hc_configs_enabled
     ON monitor_schema.health_check_configs(is_enabled) WHERE is_enabled = TRUE;
 
 -- ============================
@@ -219,7 +234,7 @@ CREATE TABLE IF NOT EXISTS report_schema.daily_snapshots (
     created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_snapshots_date 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_snapshots_date
     ON report_schema.daily_snapshots(snapshot_date);
 
 -- ============================

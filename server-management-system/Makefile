@@ -30,19 +30,30 @@ build: ## Build all service Docker images
 # ── Test ──
 test: ## Run all tests with coverage
 	@echo "=== Testing shared ==="
-	cd shared && go test ./... -coverprofile=coverage.out -covermode=atomic -v
+	cd shared && go test ./... -cover -count=1 -v
 	@echo "=== Testing auth-service ==="
-	cd auth-service && go test ./... -coverprofile=coverage.out -covermode=atomic -v
+	cd auth-service && go test ./... -cover -count=1 -v
 	@echo "=== Testing server-service ==="
-	cd server-service && go test ./... -coverprofile=coverage.out -covermode=atomic -v
+	cd server-service && go test ./... -cover -count=1 -v
 	@echo "=== Testing api-gateway ==="
-	cd api-gateway && go test ./... -coverprofile=coverage.out -covermode=atomic -v
+	cd api-gateway && go test ./... -cover -count=1 -v
+	@echo "=== Testing monitor-service ==="
+	cd monitor-service && go test ./... -cover -count=1 -v
+	@echo "=== Testing report-service ==="
+	cd report-service && go test ./... -cover -count=1 -v
+	@echo "=== Testing fileio-service ==="
+	cd fileio-service && go test ./... -cover -count=1 -v
+	@echo "=== Testing tcp-simulator ==="
+	cd tcp-simulator && go test ./... -cover -count=1 -v
+	@echo "All tests completed."
 
 coverage: ## Generate HTML coverage reports
-	@for svc in shared auth-service server-service api-gateway; do \
+	@for svc in shared auth-service server-service api-gateway monitor-service report-service fileio-service tcp-simulator; do \
 		echo ">>> $$svc coverage:"; \
-		cd $$svc && go tool cover -func=coverage.out | tail -1 && cd ..; \
-		go tool cover -html=$$svc/coverage.out -o $$svc/coverage.html; \
+		cd $$svc && go test ./... -coverprofile=coverage.out -covermode=atomic -count=1; \
+		go tool cover -func=coverage.out | tail -1; \
+		go tool cover -html=coverage.out -o coverage.html; \
+		cd ..; \
 	done
 	@echo "Coverage reports generated."
 
@@ -59,10 +70,14 @@ deps: ## Install all dependencies
 	cd auth-service && go mod tidy
 	cd server-service && go mod tidy
 	cd api-gateway && go mod tidy
+	cd monitor-service && go mod tidy
+	cd report-service && go mod tidy
+	cd fileio-service && go mod tidy
+	cd tcp-simulator && go mod tidy
 
 # ── Run ──
 seed: ## Seed 10.000 servers into PostgreSQL
-	docker exec -it vcs-sms-postgres psql -U vcs_admin -d vcs_sms -f /docker-entrypoint-initdb.d/seed_10k_servers.sql
+	docker exec -it vcs-sms-postgres sh -c 'psql -U "$${POSTGRES_USER:-postgres}" -d "$${POSTGRES_DB:-vcs_sms}" -f /seed/seed_10k_servers.sql'
 
 logs: ## Tail all service logs
 	docker-compose logs -f

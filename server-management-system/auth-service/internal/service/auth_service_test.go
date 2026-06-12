@@ -98,6 +98,46 @@ func (m *mockUserRepo) FindRoleByName(ctx context.Context, name string) (*model.
 	return r, nil
 }
 
+func (m *mockUserRepo) FindByIDFull(ctx context.Context, id uuid.UUID) (*model.User, error) {
+	return m.FindByIDWithRole(ctx, id)
+}
+
+func (m *mockUserRepo) FindAllUsers(ctx context.Context, page, pageSize int) ([]model.User, int64, error) {
+	var users []model.User
+	for _, u := range m.users {
+		user := *u
+		if user.RoleID != uuid.Nil {
+			for _, r := range m.roles {
+				if r.ID == user.RoleID {
+					user.Role = r
+					break
+				}
+			}
+		}
+		users = append(users, user)
+	}
+
+	total := int64(len(users))
+	start := (page - 1) * pageSize
+	if start >= len(users) {
+		return []model.User{}, total, nil
+	}
+	end := start + pageSize
+	if end > len(users) {
+		end = len(users)
+	}
+	return users[start:end], total, nil
+}
+
+func (m *mockUserRepo) UpdateRole(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error {
+	u, ok := m.usersByID[userID]
+	if !ok {
+		return gorm.ErrRecordNotFound
+	}
+	u.RoleID = roleID
+	return nil
+}
+
 func (m *mockUserRepo) addRole(name string, scopes []string) *model.Role {
 	roleID := uuid.New()
 	r := &model.Role{
@@ -172,7 +212,6 @@ func TestRegister_Success(t *testing.T) {
 		Email:    "new@test.com",
 		Password: "password123",
 		FullName: "New User",
-		RoleName: "operator",
 	}
 
 	resp, err := svc.Register(context.Background(), req)
@@ -182,11 +221,11 @@ func TestRegister_Success(t *testing.T) {
 	if resp.Username != "newuser" {
 		t.Errorf("expected username 'newuser', got '%s'", resp.Username)
 	}
-	if resp.Role != "operator" {
-		t.Errorf("expected role 'operator', got '%s'", resp.Role)
+	if resp.Role != "viewer" {
+		t.Errorf("expected role 'viewer' (default), got '%s'", resp.Role)
 	}
-	if len(resp.Scopes) != 2 {
-		t.Errorf("expected 2 scopes, got %d", len(resp.Scopes))
+	if len(resp.Scopes) != 1 {
+		t.Errorf("expected 1 scope for viewer, got %d", len(resp.Scopes))
 	}
 }
 
@@ -199,7 +238,6 @@ func TestRegister_DuplicateUsername(t *testing.T) {
 		Email:    "other@test.com",
 		Password: "password123",
 		FullName: "Dupe User",
-		RoleName: "viewer",
 	}
 
 	_, err := svc.Register(context.Background(), req)
@@ -217,7 +255,6 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 		Email:    "taken@test.com",
 		Password: "password123",
 		FullName: "Dupe Email",
-		RoleName: "viewer",
 	}
 
 	_, err := svc.Register(context.Background(), req)
@@ -226,20 +263,108 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	}
 }
 
-func TestRegister_InvalidRole(t *testing.T) {
-	svc, _ := newTestAuthService()
+func TestRegister_CreateError(t *testing.T) {
+	svc, repo := newTestAuthService()
+	repo.createShouldFail = true
 
 	req := &dto.RegisterRequest{
-		Username: "user3",
-		Email:    "user3@test.com",
+		Username: "createfail",
+		Email:    "createfail@test.com",
 		Password: "password123",
-		FullName: "Bad Role",
-		RoleName: "nonexistent",
+		FullName: "Create Fail",
 	}
 
 	_, err := svc.Register(context.Background(), req)
 	if err == nil {
-		t.Fatal("expected error for invalid role")
+		t.Fatal("expected error when repository create fails")
+	}
+}
+
+// ── User Management Tests ──
+
+func TestUpdateUserRole_Success(t *testing.T) {
+	svc, repo := newTestAuthService()
+	currentAdmin := repo.addUser("adminuser", "adminuser@test.com", "password123", "admin", true)
+	target := repo.addUser("vieweruser", "vieweruser@test.com", "password123", "viewer", true)
+
+	resp, err := svc.UpdateUserRole(context.Background(), currentAdmin.ID, target.ID, &dto.UpdateUserRoleRequest{RoleName: "operator"})
+	if err != nil {
+		t.Fatalf("UpdateUserRole failed: %v", err)
+	}
+	if resp.Role != "operator" {
+		t.Fatalf("expected role operator, got %s", resp.Role)
+	}
+	if repo.usersByID[target.ID].RoleID != repo.roles["operator"].ID {
+		t.Fatal("expected target role_id to be updated")
+	}
+	if len(resp.Scopes) != 2 {
+		t.Fatalf("expected operator scopes in response, got %#v", resp.Scopes)
+	}
+}
+
+func TestUpdateUserRole_CannotChangeOwnRole(t *testing.T) {
+	svc, repo := newTestAuthService()
+	admin := repo.addUser("selfadmin", "selfadmin@test.com", "password123", "admin", true)
+
+	_, err := svc.UpdateUserRole(context.Background(), admin.ID, admin.ID, &dto.UpdateUserRoleRequest{RoleName: "viewer"})
+	if !errors.Is(err, ErrCannotChangeOwnRole) {
+		t.Fatalf("expected ErrCannotChangeOwnRole, got %v", err)
+	}
+}
+
+func TestUpdateUserRole_UserNotFound(t *testing.T) {
+	svc, repo := newTestAuthService()
+	admin := repo.addUser("adminmissing", "adminmissing@test.com", "password123", "admin", true)
+
+	_, err := svc.UpdateUserRole(context.Background(), admin.ID, uuid.New(), &dto.UpdateUserRoleRequest{RoleName: "viewer"})
+	if !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	}
+}
+
+func TestUpdateUserRole_RoleNotFound(t *testing.T) {
+	svc, repo := newTestAuthService()
+	admin := repo.addUser("adminrole", "adminrole@test.com", "password123", "admin", true)
+	target := repo.addUser("targetrole", "targetrole@test.com", "password123", "viewer", true)
+
+	_, err := svc.UpdateUserRole(context.Background(), admin.ID, target.ID, &dto.UpdateUserRoleRequest{RoleName: "missing"})
+	if !errors.Is(err, ErrRoleNotFound) {
+		t.Fatalf("expected ErrRoleNotFound, got %v", err)
+	}
+}
+
+func TestListUsers_Success(t *testing.T) {
+	svc, repo := newTestAuthService()
+	repo.addUser("user1", "user1@test.com", "password123", "viewer", true)
+	repo.addUser("user2", "user2@test.com", "password123", "operator", true)
+
+	resp, err := svc.ListUsers(context.Background(), 1, 1)
+	if err != nil {
+		t.Fatalf("ListUsers failed: %v", err)
+	}
+	if resp.Total != 2 || resp.Page != 1 || resp.PageSize != 1 || resp.TotalPages != 2 {
+		t.Fatalf("unexpected pagination response: %#v", resp)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected one paginated item, got %d", len(resp.Items))
+	}
+	if resp.Items[0].Role == "" {
+		t.Fatal("expected role in list response")
+	}
+	if len(resp.Items[0].Scopes) == 0 {
+		t.Fatal("expected scopes in list response")
+	}
+}
+
+func TestListUsers_Empty(t *testing.T) {
+	svc, _ := newTestAuthService()
+
+	resp, err := svc.ListUsers(context.Background(), 1, 20)
+	if err != nil {
+		t.Fatalf("ListUsers failed: %v", err)
+	}
+	if resp.Total != 0 || resp.TotalPages != 0 || len(resp.Items) != 0 {
+		t.Fatalf("unexpected empty response: %#v", resp)
 	}
 }
 
@@ -320,6 +445,22 @@ func TestLogin_InactiveUser(t *testing.T) {
 	}
 }
 
+func TestLogin_LoadRoleError(t *testing.T) {
+	svc, repo := newTestAuthService()
+	u := repo.addUser("noroleload", "noroleload@test.com", "password123", "admin", true)
+	delete(repo.usersByID, u.ID)
+
+	req := &dto.LoginRequest{
+		Username: "noroleload",
+		Password: "password123",
+	}
+
+	_, err := svc.Login(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error when role lookup fails")
+	}
+}
+
 // ── GetProfile Tests ──
 
 func TestGetProfile_Success(t *testing.T) {
@@ -344,6 +485,17 @@ func TestGetProfile_NotFound(t *testing.T) {
 	_, err := svc.GetProfile(context.Background(), uuid.New())
 	if err == nil {
 		t.Fatal("expected error for non-existent user")
+	}
+}
+
+func TestGetProfile_RoleMissing(t *testing.T) {
+	svc, repo := newTestAuthService()
+	u := repo.addUser("missingrole", "missingrole@test.com", "pass", "viewer", true)
+	u.RoleID = uuid.Nil
+
+	_, err := svc.GetProfile(context.Background(), u.ID)
+	if err == nil {
+		t.Fatal("expected error for user without role")
 	}
 }
 

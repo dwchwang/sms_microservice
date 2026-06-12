@@ -12,21 +12,26 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vcs-sms/auth-service/internal/dto"
+	"github.com/vcs-sms/auth-service/internal/service"
 	sharedjwt "github.com/vcs-sms/shared/pkg/jwt"
 )
 
 // ── Mock ──
 
 type mockAuthService struct {
-	registerResult *dto.UserResponse
-	registerErr    error
-	loginResult    *dto.LoginResponse
-	loginErr       error
-	refreshResult  *dto.LoginResponse
-	refreshErr     error
-	logoutErr      error
-	profileResult  *dto.UserResponse
-	profileErr     error
+	registerResult   *dto.UserResponse
+	registerErr      error
+	loginResult      *dto.LoginResponse
+	loginErr         error
+	refreshResult    *dto.LoginResponse
+	refreshErr       error
+	logoutErr        error
+	profileResult    *dto.UserResponse
+	profileErr       error
+	listUsersResult  *dto.UserListResponse
+	listUsersErr     error
+	updateRoleResult *dto.UserResponse
+	updateRoleErr    error
 }
 
 func (m *mockAuthService) Register(ctx context.Context, req *dto.RegisterRequest) (*dto.UserResponse, error) {
@@ -44,6 +49,12 @@ func (m *mockAuthService) Logout(ctx context.Context, jti string, exp time.Time,
 func (m *mockAuthService) GetProfile(ctx context.Context, id uuid.UUID) (*dto.UserResponse, error) {
 	return m.profileResult, m.profileErr
 }
+func (m *mockAuthService) ListUsers(ctx context.Context, page, pageSize int) (*dto.UserListResponse, error) {
+	return m.listUsersResult, m.listUsersErr
+}
+func (m *mockAuthService) UpdateUserRole(ctx context.Context, currentUserID uuid.UUID, targetUserID uuid.UUID, req *dto.UpdateUserRoleRequest) (*dto.UserResponse, error) {
+	return m.updateRoleResult, m.updateRoleErr
+}
 
 func setupTestRouter(handler *AuthHandler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -55,6 +66,8 @@ func setupTestRouter(handler *AuthHandler) *gin.Engine {
 		auth.POST("/refresh", handler.RefreshToken)
 		auth.POST("/logout", handler.Logout)
 		auth.GET("/profile", handler.GetProfile)
+		auth.GET("/users", handler.ListUsers)
+		auth.PUT("/users/:user_id/role", handler.UpdateUserRole)
 	}
 	return r
 }
@@ -70,12 +83,12 @@ func generateTestToken(userID, username, role string, scopes []string, secret st
 
 func TestRegisterHandler_ValidBody(t *testing.T) {
 	mock := &mockAuthService{
-		registerResult: &dto.UserResponse{ID: uuid.New(), Username: "newuser", Email: "new@test.com", Role: "operator"},
+		registerResult: &dto.UserResponse{ID: uuid.New(), Username: "newuser", Email: "new@test.com", Role: "viewer"},
 	}
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":"newuser","email":"new@test.com","password":"password123","full_name":"New User","role_name":"operator"}`
+	body := `{"username":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -104,13 +117,20 @@ func TestRegisterHandler_InvalidBody(t *testing.T) {
 
 func TestRegisterHandler_ConflictError(t *testing.T) {
 	mock := &mockAuthService{
-		registerErr: context.DeadlineExceeded, // triggers default → 500, but we want 409
+		registerErr: service.ErrDuplicateUsername,
 	}
-	// Override: use a known sentinel
-	mock.registerErr = nil // will use the struct default which produces success
-	// Actually test via handler's handleAuthError — mock needs to return a real sentinel
-	_ = mock
-	// This is tested in service tests; handler just maps errors
+	handler := NewAuthHandler(mock, "test-secret")
+	router := setupTestRouter(handler)
+
+	body := `{"username":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
+	req, _ := http.NewRequest("POST", "/api/v1/auth/register", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d", w.Code)
+	}
 }
 
 // ── Login Tests ──
@@ -154,6 +174,22 @@ func TestLoginHandler_MissingFields(t *testing.T) {
 	}
 }
 
+func TestLoginHandler_InvalidCredentials(t *testing.T) {
+	mock := &mockAuthService{loginErr: service.ErrInvalidCredentials}
+	handler := NewAuthHandler(mock, "test-secret")
+	router := setupTestRouter(handler)
+
+	body := `{"username":"admin","password":"wrong"}`
+	req, _ := http.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
 // ── Refresh Tests ──
 
 func TestRefreshHandler_Success(t *testing.T) {
@@ -187,6 +223,22 @@ func TestRefreshHandler_InvalidBody(t *testing.T) {
 
 	if w.Code != http.StatusUnprocessableEntity {
 		t.Errorf("expected 422, got %d", w.Code)
+	}
+}
+
+func TestRefreshHandler_RevokedToken(t *testing.T) {
+	mock := &mockAuthService{refreshErr: service.ErrTokenRevoked}
+	handler := NewAuthHandler(mock, "test-secret")
+	router := setupTestRouter(handler)
+
+	body := `{"refresh_token":"revoked-refresh"}`
+	req, _ := http.NewRequest("POST", "/api/v1/auth/refresh", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
 	}
 }
 
@@ -237,6 +289,23 @@ func TestLogoutHandler_MalformedToken(t *testing.T) {
 	}
 }
 
+func TestLogoutHandler_ServiceError(t *testing.T) {
+	mock := &mockAuthService{logoutErr: context.DeadlineExceeded}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "test", "admin", []string{"server:read"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("POST", "/api/v1/auth/logout", bytes.NewBufferString(`{"refresh_token_jti":"rt-jti"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", w.Code)
+	}
+}
+
 // ── GetProfile Tests ──
 
 func TestGetProfileHandler_Success(t *testing.T) {
@@ -246,7 +315,7 @@ func TestGetProfileHandler_Success(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("user-1", "testuser", "admin", []string{"server:read"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "testuser", "admin", []string{"server:read"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("GET", "/api/v1/auth/profile", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -285,5 +354,168 @@ func TestGetProfileHandler_InvalidToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestGetProfileHandler_InvalidUserID(t *testing.T) {
+	mock := &mockAuthService{}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("not-a-uuid", "test", "admin", nil, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("GET", "/api/v1/auth/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestGetProfileHandler_NotFound(t *testing.T) {
+	mock := &mockAuthService{profileErr: service.ErrUserNotFound}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "test", "admin", nil, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("GET", "/api/v1/auth/profile", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// ── User Management Tests ──
+
+func TestListUsersHandler_Success(t *testing.T) {
+	mock := &mockAuthService{
+		listUsersResult: &dto.UserListResponse{
+			Total:      1,
+			Page:       1,
+			PageSize:   20,
+			TotalPages: 1,
+			Items: []dto.UserResponse{
+				{ID: uuid.New(), Username: "viewer01", Email: "viewer@test.com", Role: "viewer", Scopes: []string{"server:read"}},
+			},
+		},
+	}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("GET", "/api/v1/auth/users?page=1&page_size=20", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListUsersHandler_NoToken(t *testing.T) {
+	mock := &mockAuthService{}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	req, _ := http.NewRequest("GET", "/api/v1/auth/users", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestListUsersHandler_MissingUserManageScope(t *testing.T) {
+	mock := &mockAuthService{}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "viewer", "viewer", []string{"server:read"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("GET", "/api/v1/auth/users", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestUpdateUserRoleHandler_Success(t *testing.T) {
+	targetID := uuid.New()
+	mock := &mockAuthService{
+		updateRoleResult: &dto.UserResponse{ID: targetID, Username: "operator01", Email: "operator@test.com", Role: "operator", Scopes: []string{"server:read", "server:update"}},
+	}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"operator"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateUserRoleHandler_MissingUserManageScope(t *testing.T) {
+	targetID := uuid.New()
+	mock := &mockAuthService{}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "viewer", "viewer", []string{"server:read"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"admin"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestUpdateUserRoleHandler_CannotChangeOwnRole(t *testing.T) {
+	targetID := uuid.New()
+	mock := &mockAuthService{updateRoleErr: service.ErrCannotChangeOwnRole}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken(targetID.String(), "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"viewer"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdateUserRoleHandler_InvalidUserID(t *testing.T) {
+	mock := &mockAuthService{}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/not-a-uuid/role", bytes.NewBufferString(`{"role_name":"operator"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
 	}
 }

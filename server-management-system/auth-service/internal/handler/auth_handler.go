@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,8 @@ import (
 	sharedjwt "github.com/vcs-sms/shared/pkg/jwt"
 	"github.com/vcs-sms/shared/response"
 )
+
+const userManageScope = "user:manage"
 
 // AuthHandler handles HTTP requests for authentication endpoints.
 type AuthHandler struct {
@@ -187,6 +190,112 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 	response.Success(c, http.StatusOK, "Profile retrieved", result)
 }
 
+// ListUsers handles GET /auth/users
+// @Summary List all users
+// @Tags Users
+// @Security BearerAuth
+// @Produce json
+// @Param page query int false "Page number" default(1)
+// @Param page_size query int false "Page size" default(20)
+// @Success 200 {object} response.ApiResponse
+// @Failure 401 {object} response.ApiErrorResponse
+// @Failure 403 {object} response.ApiErrorResponse
+// @Router /api/v1/auth/users [get]
+func (h *AuthHandler) ListUsers(c *gin.Context) {
+	if _, ok := h.requireScope(c, userManageScope); !ok {
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+
+	result, err := h.svc.ListUsers(c.Request.Context(), page, pageSize)
+	if err != nil {
+		response.InternalError(c, "Failed to list users")
+		return
+	}
+
+	response.Success(c, http.StatusOK, "Users retrieved", result)
+}
+
+// UpdateUserRole handles PUT /auth/users/{user_id}/role
+// @Summary Update a user's role
+// @Tags Users
+// @Security BearerAuth
+// @Accept json
+// @Produce json
+// @Param user_id path string true "User UUID"
+// @Param request body dto.UpdateUserRoleRequest true "New role"
+// @Success 200 {object} response.ApiResponse
+// @Failure 400 {object} response.ApiErrorResponse
+// @Failure 401 {object} response.ApiErrorResponse
+// @Failure 403 {object} response.ApiErrorResponse
+// @Failure 404 {object} response.ApiErrorResponse
+// @Router /api/v1/auth/users/{user_id}/role [put]
+func (h *AuthHandler) UpdateUserRole(c *gin.Context) {
+	claims, ok := h.requireScope(c, userManageScope)
+	if !ok {
+		return
+	}
+	currentUserID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		response.Unauthorized(c, "Invalid user identity")
+		return
+	}
+
+	// Parse target user ID from path
+	targetUserID, err := uuid.Parse(c.Param("user_id"))
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "Invalid user ID format")
+		return
+	}
+
+	var req dto.UpdateUserRoleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ValidationError(c, "Invalid request body", parseValidationErrors(err)...)
+		return
+	}
+
+	result, err := h.svc.UpdateUserRole(c.Request.Context(), currentUserID, targetUserID, &req)
+	if err != nil {
+		handleAuthError(c, err)
+		return
+	}
+
+	response.Success(c, http.StatusOK, "User role updated", result)
+}
+
+func (h *AuthHandler) requireScope(c *gin.Context, requiredScope string) (*sharedjwt.Claims, bool) {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		response.Unauthorized(c, "User not authenticated")
+		return nil, false
+	}
+
+	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+	claims, err := sharedjwt.ValidateToken(tokenString, h.secret)
+	if err != nil {
+		response.Unauthorized(c, "Invalid or expired token")
+		return nil, false
+	}
+
+	for _, scope := range claims.Scopes {
+		if scope == requiredScope {
+			return claims, true
+		}
+	}
+
+	response.Forbidden(c, fmt.Sprintf("Required scope: %s", requiredScope))
+	return nil, false
+}
+
 // handleAuthError maps service errors to HTTP error responses using errors.Is.
 func handleAuthError(c *gin.Context, err error) {
 	switch {
@@ -208,6 +317,8 @@ func handleAuthError(c *gin.Context, err error) {
 		response.Error(c, http.StatusTooManyRequests, "TOO_MANY_ATTEMPTS", response.FieldError{
 			Field: "credentials", Code: "TOO_MANY_ATTEMPTS", Message: "Too many login attempts. Try again in 15 minutes.",
 		})
+	case errors.Is(err, service.ErrCannotChangeOwnRole):
+		response.Error(c, http.StatusBadRequest, "Cannot change your own role")
 	default:
 		response.InternalError(c, apperrors.ErrInternalServer.Message)
 	}

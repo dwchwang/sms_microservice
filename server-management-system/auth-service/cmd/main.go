@@ -72,6 +72,8 @@ func main() {
 		auth.POST("/refresh", authHandler.RefreshToken)
 		auth.POST("/logout", authHandler.Logout)
 		auth.GET("/profile", authHandler.GetProfile)
+		auth.GET("/users", authHandler.ListUsers)
+		auth.PUT("/users/:user_id/role", authHandler.UpdateUserRole)
 	}
 
 	// 7. Start server with graceful shutdown

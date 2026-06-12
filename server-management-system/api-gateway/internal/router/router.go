@@ -6,6 +6,7 @@ import (
 	"github.com/vcs-sms/api-gateway/config"
 	"github.com/vcs-sms/api-gateway/internal/middleware"
 	"github.com/vcs-sms/api-gateway/internal/proxy"
+	"github.com/vcs-sms/api-gateway/internal/swagger"
 	sharedmw "github.com/vcs-sms/shared/middleware"
 )
 
@@ -23,12 +24,16 @@ func SetupRouter(cfg *config.Config, redisClient *redis.Client) *gin.Engine {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
+	swagger.RegisterRoutes(r, "")
 
 	// ── Public routes (no auth required) ──
+	authProxy := proxy.NewReverseProxy(cfg.AuthServiceURL)
 	public := r.Group("/api/v1")
 	{
-		// Auth endpoints are public
-		public.Any("/auth/*path", proxy.NewReverseProxy(cfg.AuthServiceURL))
+		// Only these auth endpoints are public.
+		public.POST("/auth/register", authProxy)
+		public.POST("/auth/login", authProxy)
+		public.POST("/auth/refresh", authProxy)
 	}
 
 	// ── Protected routes (JWT required) ──
@@ -72,6 +77,15 @@ func SetupRouter(cfg *config.Config, redisClient *redis.Client) *gin.Engine {
 		{
 			monitor.GET("/status", middleware.ScopeMiddleware("monitor:view"),
 				proxy.NewReverseProxy(cfg.MonitorServiceURL))
+		}
+
+		// Auth endpoints that require a valid JWT.
+		auth := protected.Group("/auth")
+		{
+			auth.POST("/logout", authProxy)
+			auth.GET("/profile", authProxy)
+			auth.GET("/users", middleware.ScopeMiddleware("user:manage"), authProxy)
+			auth.PUT("/users/:user_id/role", middleware.ScopeMiddleware("user:manage"), authProxy)
 		}
 	}
 

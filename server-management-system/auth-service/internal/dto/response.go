@@ -25,3 +25,12 @@ type UserResponse struct {
 	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// UserListResponse is the paginated response for listing users.
+type UserListResponse struct {
+	Total      int            `json:"total"`
+	Page       int            `json:"page"`
+	PageSize   int            `json:"page_size"`
+	TotalPages int            `json:"total_pages"`
+	Items      []UserResponse `json:"items"`
+}

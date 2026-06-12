@@ -38,7 +38,8 @@ BEGIN
             CASE WHEN i % 3 = 0 THEN 2000 WHEN i % 3 = 1 THEN 1000 ELSE 500 END,
             locations[1 + (i % 5)],
             'Auto-generated server #' || i
-        );
+        )
+        ON CONFLICT (server_id) DO NOTHING;
 
         -- Insert health check config
         INSERT INTO monitor_schema.health_check_configs
@@ -49,6 +50,7 @@ BEGIN
             9000 + i,
             5000,
             uptime
-        );
+        )
+        ON CONFLICT (server_id) DO NOTHING;
     END LOOP;
 END $$;

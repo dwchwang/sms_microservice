@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ═══════════════════════════════════════
   # Infrastructure
@@ -17,6 +15,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./deployments/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./deployments/docker/postgres/seed_10k_servers.sql:/seed/seed_10k_servers.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vcs_admin} -d ${POSTGRES_DB:-vcs_sms}"]
       interval: 10s

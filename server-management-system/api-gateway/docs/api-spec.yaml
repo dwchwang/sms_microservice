@@ -1,0 +1,1426 @@
+openapi: 3.0.3
+info:
+  title: Server Management System API
+  description: |
+    API quản lý 10.000 server.
+    
+    ## Tính năng chính
+    - **Auth**: Đăng ký, đăng nhập, JWT, RBAC (Admin / Operator / Viewer)
+    - **Server CRUD**: Tạo, xem (filter/sort/paging), cập nhật, xóa
+    - **Import/Export Excel**: Upload .xlsx để import hàng loạt, export ra file
+    - **Monitoring**: Health-check TCP 10.000 server mỗi 60s, ghi Elasticsearch
+    - **Báo cáo**: Báo cáo định kỳ qua Email + API báo cáo chủ động
+    
+    ## Authentication
+    Tất cả API (trừ register, login, refresh) yêu cầu JWT Bearer token.
+    Mỗi API có scope riêng (xem từng endpoint).
+    
+    ## Error Format
+    ```json
+    {
+      "status": "error",
+      "code": 42201,
+      "message": "Validation failed",
+      "errors": [{ "field": "ipv4", "code": "INVALID_FORMAT", "message": "..." }],
+      "meta": { "request_id": "req-uuid", "timestamp": "2026-06-10T10:00:00Z" }
+    }
+    ```
+  version: 1.0.0
+  contact:
+    name: SMS Team
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local Docker
+
+tags:
+  - name: Auth
+    description: Đăng ký, đăng nhập, JWT
+  - name: Servers
+    description: CRUD server
+  - name: Import/Export
+    description: Import/Export Excel
+  - name: Reports
+    description: Báo cáo & Email
+  - name: Users
+    description: Quản lý người dùng (Admin only)
+
+# ═══════════════════════════════════════
+# Security
+# ═══════════════════════════════════════
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT Access Token. Lấy từ POST /auth/login.
+        Token hết hạn sau 15 phút, dùng POST /auth/refresh để làm mới.
+
+  # ═══════════════════════════════════════
+  # Schemas
+  # ═══════════════════════════════════════
+  schemas:
+    # ── Auth ──
+    RegisterRequest:
+      type: object
+      required: [username, email, password, full_name]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 100
+          example: admin01
+        email:
+          type: string
+          format: email
+          example: admin@example.com
+        password:
+          type: string
+          minLength: 8
+          example: "SecureP@ss123"
+        full_name:
+          type: string
+          example: "Nguyen Van A"
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: admin01
+        password:
+          type: string
+          example: "SecureP@ss123"
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIs...
+        refresh_token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIs...
+        token_type:
+          type: string
+          example: Bearer
+        expires_in:
+          type: integer
+          example: 900
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIs...
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        username:
+          type: string
+          example: admin01
+        email:
+          type: string
+          example: admin@example.com
+        full_name:
+          type: string
+          example: "Nguyen Van A"
+        role:
+          type: string
+          example: admin
+        scopes:
+          type: array
+          items:
+            type: string
+          example: ["server:create", "server:read", "server:update", "server:delete", "server:import", "server:export", "report:view", "report:send", "user:manage"]
+        is_active:
+          type: boolean
+          example: true
+        last_login_at:
+          type: string
+          format: date-time
+          example: "2026-06-10T08:00:00Z"
+        created_at:
+          type: string
+          format: date-time
+
+    # ── User Management ──
+    UpdateUserRoleRequest:
+      type: object
+      required: [role_name]
+      properties:
+        role_name:
+          type: string
+          enum: [admin, operator, viewer]
+          description: "Vai trò mới cho user"
+          example: operator
+
+    UserListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 42
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+        total_pages:
+          type: integer
+          example: 3
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserProfile'
+
+    # ── Server ──
+    CreateServerRequest:
+      type: object
+      required: [server_id, server_name, ipv4]
+      properties:
+        server_id:
+          type: string
+          pattern: '^[A-Z0-9\-_]+$'
+          minLength: 3
+          maxLength: 100
+          example: SRV-NEW-001
+        server_name:
+          type: string
+          minLength: 3
+          maxLength: 255
+          example: web-new-01
+        ipv4:
+          type: string
+          format: ipv4
+          example: 10.0.1.100
+        os:
+          type: string
+          example: Ubuntu 22.04
+        cpu_cores:
+          type: integer
+          minimum: 1
+          example: 8
+        ram_gb:
+          type: number
+          format: double
+          minimum: 0
+          example: 16
+        disk_gb:
+          type: number
+          format: double
+          minimum: 0
+          example: 500
+        location:
+          type: string
+          example: DC-HN
+        description:
+          type: string
+          example: Web server tầng frontend
+
+    UpdateServerRequest:
+      type: object
+      properties:
+        server_name:
+          type: string
+          minLength: 3
+          maxLength: 255
+        ipv4:
+          type: string
+          format: ipv4
+        os:
+          type: string
+        cpu_cores:
+          type: integer
+          minimum: 1
+        ram_gb:
+          type: number
+          format: double
+          minimum: 0
+        disk_gb:
+          type: number
+          format: double
+          minimum: 0
+        location:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+          enum: [on, off]
+
+    ServerResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          example: SRV-00001
+        server_name:
+          type: string
+          example: web-0001
+        status:
+          type: string
+          enum: [on, off]
+          example: "on"
+        ipv4:
+          type: string
+          example: tcp-simulator
+        os:
+          type: string
+          example: Ubuntu 22.04
+        cpu_cores:
+          type: integer
+          example: 8
+        ram_gb:
+          type: number
+          example: 16
+        disk_gb:
+          type: number
+          example: 500
+        location:
+          type: string
+          example: DC-HN
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ServerListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 9523
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+        total_pages:
+          type: integer
+          example: 477
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServerResponse'
+
+    # ── Import/Export ──
+    ImportJobResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+          example: pending
+        file_name:
+          type: string
+          example: servers.xlsx
+        message:
+          type: string
+          example: "File đã được nhận, đang xử lý bất đồng bộ"
+
+    ImportJobStatusResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+          example: completed
+        file_name:
+          type: string
+        total_rows:
+          type: integer
+          example: 500
+        success_count:
+          type: integer
+          example: 480
+        failed_count:
+          type: integer
+          example: 20
+        success_list:
+          type: array
+          items:
+            type: object
+            properties:
+              server_id:
+                type: string
+              server_name:
+                type: string
+        failed_list:
+          type: array
+          items:
+            type: object
+            properties:
+              row_number:
+                type: integer
+              server_id:
+                type: string
+              server_name:
+                type: string
+              error_reason:
+                type: string
+        error_message:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    ExportRequest:
+      type: object
+      properties:
+        filter:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [on, off]
+            server_name:
+              type: string
+            ipv4:
+              type: string
+            location:
+              type: string
+            os:
+              type: string
+        sort_by:
+          type: string
+          enum: [server_id, server_name, status, ipv4, location, created_at, updated_at]
+          example: created_at
+        sort_order:
+          type: string
+          enum: [asc, desc]
+          example: desc
+
+    # ── Report ──
+    ReportSummaryResponse:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            start_date:
+              type: string
+              format: date
+            end_date:
+              type: string
+              format: date
+        summary:
+          type: object
+          properties:
+            total_servers:
+              type: integer
+              example: 10000
+            servers_on:
+              type: integer
+              example: 9523
+            servers_off:
+              type: integer
+              example: 477
+            avg_uptime_pct:
+              type: number
+              format: double
+              example: 97.85
+        daily_breakdown:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              on:
+                type: integer
+              off:
+                type: integer
+              uptime:
+                type: number
+        low_uptime_servers:
+          type: array
+          items:
+            type: object
+            properties:
+              server_id:
+                type: string
+              server_name:
+                type: string
+              uptime:
+                type: number
+
+    SendReportRequest:
+      type: object
+      required: [start_date, end_date, email]
+      properties:
+        start_date:
+          type: string
+          format: date
+          example: "2026-06-01"
+        end_date:
+          type: string
+          format: date
+          example: "2026-06-07"
+        email:
+          type: string
+          format: email
+          example: admin@company.com
+
+    SendReportResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Report sent successfully"
+        report_id:
+          type: string
+          format: uuid
+        summary:
+          $ref: '#/components/schemas/ReportSummaryResponse/properties/summary'
+
+    # ── Common ──
+    SuccessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        code:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: "Operation completed successfully"
+        data:
+          type: object
+        meta:
+          $ref: '#/components/schemas/MetaInfo'
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        code:
+          type: integer
+          example: 42201
+        message:
+          type: string
+          example: "Validation failed"
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+        meta:
+          $ref: '#/components/schemas/MetaInfo'
+
+    FieldError:
+      type: object
+      properties:
+        field:
+          type: string
+          example: ipv4
+        code:
+          type: string
+          example: INVALID_FORMAT
+        message:
+          type: string
+          example: "IPv4 must be in format x.x.x.x"
+
+    MetaInfo:
+      type: object
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440099"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-06-10T10:00:00Z"
+
+# ═══════════════════════════════════════
+# Paths
+# ═══════════════════════════════════════
+paths:
+  # ═══ AUTH ═══
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Đăng ký tài khoản mới
+      operationId: register
+      security: []  # Public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Đăng ký thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserProfile'
+        '400':
+          description: Request body không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Username hoặc email đã tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Đăng nhập, nhận JWT token
+      operationId: login
+      security: []  # Public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Đăng nhập thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Sai username hoặc password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Làm mới access token bằng refresh token
+      operationId: refreshToken
+      security: []  # Public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Token mới
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Refresh token không hợp lệ hoặc hết hạn
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Đăng xuất, đưa token vào blacklist
+      operationId: logout
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Đăng xuất thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message:
+                            type: string
+                            example: "Logged out successfully"
+        '401':
+          description: Token không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/profile:
+    get:
+      tags: [Auth]
+      summary: Xem thông tin profile của user hiện tại
+      operationId: getProfile
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Profile user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserProfile'
+        '401':
+          description: Token không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ═══ USERS ═══
+  /auth/users:
+    get:
+      tags: [Users]
+      summary: Lấy danh sách người dùng (Admin only)
+      description: |
+        **Scope:** `user:manage`
+        **Role:** Admin only
+      operationId: listUsers
+      security:
+        - BearerAuth: [user:manage]
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Trang hiện tại
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Số lượng user mỗi trang
+      responses:
+        '200':
+          description: Danh sách người dùng
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserListResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `user:manage`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/users/{user_id}/role:
+    put:
+      tags: [Users]
+      summary: Thay đổi role của người dùng (Admin only)
+      description: |
+        Admin có thể nâng cấp hoặc hạ cấp role của user khác.
+        Không thể tự thay đổi role của chính mình.
+        **Scope:** `user:manage`
+        **Role:** Admin only
+      operationId: updateUserRole
+      security:
+        - BearerAuth: [user:manage]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRoleRequest'
+      responses:
+        '200':
+          description: Role đã được cập nhật
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserProfile'
+        '400':
+          description: Không thể tự đổi role của mình hoặc request không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `user:manage`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: User không tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ═══ SERVERS ═══
+  /servers:
+    post:
+      tags: [Servers]
+      summary: Tạo server mới
+      description: |
+        Tạo 1 server với đầy đủ thông tin.
+        **Scope:** `server:create`
+        **Role:** Admin only
+      operationId: createServer
+      security:
+        - BearerAuth: [server:create]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateServerRequest'
+      responses:
+        '201':
+          description: Server đã tạo thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ServerResponse'
+        '400':
+          description: Request body không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `server:create`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: server_id hoặc server_name đã tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: "Validation field (VD: sai format ipv4)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      tags: [Servers]
+      summary: Lấy danh sách server (filter, sort, paging)
+      description: |
+        **Scope:** `server:read`
+        **Role:** Admin, Operator, Viewer
+      operationId: listServers
+      security:
+        - BearerAuth: [server:read]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [on, off]
+          description: Lọc theo trạng thái
+        - name: server_name
+          in: query
+          schema:
+            type: string
+          description: Tìm kiếm theo tên server (LIKE %value%)
+        - name: ipv4
+          in: query
+          schema:
+            type: string
+          description: Lọc theo IPv4
+        - name: location
+          in: query
+          schema:
+            type: string
+          description: Lọc theo vị trí
+        - name: os
+          in: query
+          schema:
+            type: string
+          description: Lọc theo hệ điều hành
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            enum: [server_id, server_name, status, ipv4, location, created_at, updated_at]
+            default: created_at
+          description: Trường sắp xếp
+        - name: sort_order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+          description: Thứ tự sắp xếp
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Trang hiện tại
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Số lượng server mỗi trang
+      responses:
+        '200':
+          description: Danh sách server
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ServerListResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `server:read`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /servers/{server_id}:
+    get:
+      tags: [Servers]
+      summary: Xem chi tiết 1 server
+      description: |
+        **Scope:** `server:read`
+        **Role:** Admin, Operator, Viewer
+      operationId: getServer
+      security:
+        - BearerAuth: [server:read]
+      parameters:
+        - name: server_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: SRV-00001
+      responses:
+        '200':
+          description: Chi tiết server
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ServerResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Server không tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags: [Servers]
+      summary: Cập nhật thông tin server
+      description: |
+        Cập nhật thông tin 1 server. **Không cho phép cập nhật `server_id`.**
+        **Scope:** `server:update`
+        **Role:** Admin, Operator
+      operationId: updateServer
+      security:
+        - BearerAuth: [server:update]
+      parameters:
+        - name: server_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: SRV-00001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateServerRequest'
+      responses:
+        '200':
+          description: Server sau khi cập nhật
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ServerResponse'
+        '400':
+          description: Request body không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `server:update`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Server không tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: server_name đã tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      tags: [Servers]
+      summary: Xóa server (soft delete)
+      description: |
+        **Scope:** `server:delete`
+        **Role:** Admin only
+      operationId: deleteServer
+      security:
+        - BearerAuth: [server:delete]
+      parameters:
+        - name: server_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: SRV-00001
+      responses:
+        '200':
+          description: Đã xóa thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          server_id:
+                            type: string
+                          message:
+                            type: string
+                            example: "Server deleted successfully"
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `server:delete`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Server không tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ═══ IMPORT / EXPORT ═══
+  /servers/import:
+    post:
+      tags: [Import/Export]
+      summary: Import danh sách server từ file Excel
+      description: |
+        Upload file .xlsx. Xử lý bất đồng bộ qua Kafka.
+        Bỏ qua các `server_id` hoặc `server_name` đã tồn tại.
+        **Scope:** `server:import`
+        **Role:** Admin only
+      operationId: importServers
+      security:
+        - BearerAuth: [server:import]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File Excel .xlsx
+      responses:
+        '202':
+          description: File đã nhận, đang xử lý
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ImportJobResponse'
+        '400':
+          description: File không hợp lệ (sai format, không phải .xlsx)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `server:import`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /servers/import/{job_id}:
+    get:
+      tags: [Import/Export]
+      summary: Kiểm tra tiến độ job import
+      description: |
+        **Scope:** `server:import`
+        **Role:** Admin only
+      operationId: getImportStatus
+      security:
+        - BearerAuth: [server:import]
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440001"
+      responses:
+        '200':
+          description: Trạng thái job import
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ImportJobStatusResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `server:import`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Job không tồn tại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /servers/export:
+    post:
+      tags: [Import/Export]
+      summary: Export danh sách server ra file Excel
+      description: |
+        Trả về file .xlsx. Có filter, sort tùy chọn.
+        **Scope:** `server:export`
+        **Role:** Admin only
+      operationId: exportServers
+      security:
+        - BearerAuth: [server:export]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportRequest'
+      responses:
+        '200':
+          description: File Excel (binary stream)
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Disposition:
+              description: 'attachment; filename="servers_export_20260610.xlsx"'
+              schema:
+                type: string
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `server:export`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ═══ REPORTS ═══
+  /reports/summary:
+    get:
+      tags: [Reports]
+      summary: Xem tóm tắt báo cáo (không gửi email)
+      description: |
+        **Scope:** `report:view`
+        **Role:** Admin, Operator, Viewer
+      operationId: getReportSummary
+      security:
+        - BearerAuth: [report:view]
+      parameters:
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2026-06-01"
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2026-06-09"
+      responses:
+        '200':
+          description: Dữ liệu báo cáo
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ReportSummaryResponse'
+        '400':
+          description: Thiếu hoặc sai định dạng start_date/end_date
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `report:view`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /reports:
+    post:
+      tags: [Reports]
+      summary: Gửi báo cáo chủ động qua Email
+      description: |
+        **Scope:** `report:send`
+        **Role:** Admin only
+      operationId: sendReport
+      security:
+        - BearerAuth: [report:send]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendReportRequest'
+      responses:
+        '200':
+          description: Báo cáo đã gửi email thành công
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SendReportResponse'
+        '400':
+          description: Thiếu hoặc sai định dạng input
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `report:send`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Lỗi gửi email (SMTP fail)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'

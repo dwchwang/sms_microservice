@@ -152,6 +152,18 @@ func main() {
 			"service": "monitor-service",
 		})
 	})
+	r.GET("/api/v1/monitor/status", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":          "ok",
+			"service":         "monitor-service",
+			"check_interval":  cfg.Monitor.CheckInterval,
+			"worker_count":    cfg.Monitor.WorkerCount,
+			"tcp_timeout_ms":  cfg.Monitor.TCPTimeout,
+			"elasticsearch":   cfg.ES.Addresses,
+			"index":           cfg.ES.IndexName,
+			"redis_available": rdb != nil,
+		})
+	})
 
 	addr := fmt.Sprintf(":%s", cfg.App.Port)
 	srv := &http.Server{

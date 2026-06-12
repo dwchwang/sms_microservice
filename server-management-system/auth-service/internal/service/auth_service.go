@@ -23,6 +23,8 @@ type AuthService interface {
 	RefreshToken(ctx context.Context, req *dto.RefreshRequest) (*dto.LoginResponse, error)
 	Logout(ctx context.Context, tokenJTI string, tokenExp time.Time, refreshJTI string) error
 	GetProfile(ctx context.Context, userID uuid.UUID) (*dto.UserResponse, error)
+	UpdateUserRole(ctx context.Context, currentUserID uuid.UUID, targetUserID uuid.UUID, req *dto.UpdateUserRoleRequest) (*dto.UserResponse, error)
+	ListUsers(ctx context.Context, page, pageSize int) (*dto.UserListResponse, error)
 }
 
 // authServiceImpl implements AuthService.
@@ -63,8 +65,8 @@ func (s *authServiceImpl) Register(ctx context.Context, req *dto.RegisterRequest
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// 4. Lookup role by name
-	role, err := s.repo.FindRoleByName(ctx, req.RoleName)
+	// 4. Assign default "viewer" role (least privilege)
+	role, err := s.repo.FindRoleByName(ctx, "viewer")
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRoleNotFound, err)
 	}
@@ -309,6 +311,66 @@ func (s *authServiceImpl) buildUserResponse(user *model.User, role *model.Role) 
 		IsActive:  user.IsActive,
 		CreatedAt: user.CreatedAt,
 	}
+}
+
+// UpdateUserRole changes the role of a target user. Only callable by admin.
+// Admin cannot change their own role.
+func (s *authServiceImpl) UpdateUserRole(ctx context.Context, currentUserID uuid.UUID, targetUserID uuid.UUID, req *dto.UpdateUserRoleRequest) (*dto.UserResponse, error) {
+	// Prevent admin from changing their own role
+	if currentUserID == targetUserID {
+		return nil, ErrCannotChangeOwnRole
+	}
+
+	// Find target user
+	targetUser, err := s.repo.FindByID(ctx, targetUserID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUserNotFound, err)
+	}
+
+	// Find the requested role
+	role, err := s.repo.FindRoleByName(ctx, req.RoleName)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrRoleNotFound, err)
+	}
+
+	// Update role
+	if err := s.repo.UpdateRole(ctx, targetUser.ID, role.ID); err != nil {
+		return nil, fmt.Errorf("failed to update user role: %w", err)
+	}
+
+	// Load full user with new role
+	updatedUser, err := s.repo.FindByIDFull(ctx, targetUser.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load updated user: %w", err)
+	}
+
+	return s.buildUserResponse(updatedUser, updatedUser.Role), nil
+}
+
+// ListUsers returns all users with pagination.
+func (s *authServiceImpl) ListUsers(ctx context.Context, page, pageSize int) (*dto.UserListResponse, error) {
+	users, total, err := s.repo.FindAllUsers(ctx, page, pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list users: %w", err)
+	}
+
+	items := make([]dto.UserResponse, len(users))
+	for i, u := range users {
+		if u.Role == nil {
+			return nil, fmt.Errorf("user role not found")
+		}
+		items[i] = *s.buildUserResponse(&u, u.Role)
+	}
+
+	totalPages := (int(total) + pageSize - 1) / pageSize
+
+	return &dto.UserListResponse{
+		Total:      int(total),
+		Page:       page,
+		PageSize:   pageSize,
+		TotalPages: totalPages,
+		Items:      items,
+	}, nil
 }
 
 // checkLoginAttempts checks if the user has exceeded the maximum failed login attempts.

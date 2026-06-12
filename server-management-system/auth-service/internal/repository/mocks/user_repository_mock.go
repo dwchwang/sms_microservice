@@ -14,7 +14,10 @@ type UserRepositoryMock struct {
 	FindByEmailFunc      func(ctx context.Context, email string) (*model.User, error)
 	FindByIDFunc         func(ctx context.Context, id uuid.UUID) (*model.User, error)
 	FindByIDWithRoleFunc func(ctx context.Context, id uuid.UUID) (*model.User, error)
+	FindByIDFullFunc     func(ctx context.Context, id uuid.UUID) (*model.User, error)
+	FindAllUsersFunc     func(ctx context.Context, page, pageSize int) ([]model.User, int64, error)
 	UpdateLastLoginFunc  func(ctx context.Context, id uuid.UUID) error
+	UpdateRoleFunc       func(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error
 	FindRoleByNameFunc   func(ctx context.Context, name string) (*model.Role, error)
 }
 
@@ -65,4 +68,25 @@ func (m *UserRepositoryMock) FindRoleByName(ctx context.Context, name string) (*
 		return m.FindRoleByNameFunc(ctx, name)
 	}
 	return nil, nil
+}
+
+func (m *UserRepositoryMock) FindByIDFull(ctx context.Context, id uuid.UUID) (*model.User, error) {
+	if m.FindByIDFullFunc != nil {
+		return m.FindByIDFullFunc(ctx, id)
+	}
+	return nil, nil
+}
+
+func (m *UserRepositoryMock) FindAllUsers(ctx context.Context, page, pageSize int) ([]model.User, int64, error) {
+	if m.FindAllUsersFunc != nil {
+		return m.FindAllUsersFunc(ctx, page, pageSize)
+	}
+	return nil, 0, nil
+}
+
+func (m *UserRepositoryMock) UpdateRole(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error {
+	if m.UpdateRoleFunc != nil {
+		return m.UpdateRoleFunc(ctx, userID, roleID)
+	}
+	return nil
 }

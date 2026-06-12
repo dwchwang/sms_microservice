@@ -16,7 +16,10 @@ type UserRepository interface {
 	FindByEmail(ctx context.Context, email string) (*model.User, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*model.User, error)
 	FindByIDWithRole(ctx context.Context, id uuid.UUID) (*model.User, error)
+	FindByIDFull(ctx context.Context, id uuid.UUID) (*model.User, error)
+	FindAllUsers(ctx context.Context, page, pageSize int) ([]model.User, int64, error)
 	UpdateLastLogin(ctx context.Context, id uuid.UUID) error
+	UpdateRole(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error
 	FindRoleByName(ctx context.Context, name string) (*model.Role, error)
 }
 
@@ -104,4 +107,46 @@ func (r *userRepository) FindRoleByName(ctx context.Context, name string) (*mode
 		return nil, err
 	}
 	return &role, nil
+}
+
+// FindByIDFull retrieves a user by UUID with role and permissions fully preloaded.
+func (r *userRepository) FindByIDFull(ctx context.Context, id uuid.UUID) (*model.User, error) {
+	var user model.User
+	err := r.db.WithContext(ctx).
+		Preload("Role.Permissions").
+		Where("id = ?", id).
+		First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// FindAllUsers retrieves all active users with role permissions preloaded, paginated.
+func (r *userRepository) FindAllUsers(ctx context.Context, page, pageSize int) ([]model.User, int64, error) {
+	var users []model.User
+	var total int64
+
+	if err := r.db.WithContext(ctx).Model(&model.User{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	offset := (page - 1) * pageSize
+
+	err := r.db.WithContext(ctx).
+		Preload("Role.Permissions").
+		Order("created_at DESC").
+		Offset(offset).
+		Limit(pageSize).
+		Find(&users).Error
+
+	return users, total, err
+}
+
+// UpdateRole changes the role_id for a user.
+func (r *userRepository) UpdateRole(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error {
+	return r.db.WithContext(ctx).
+		Model(&model.User{}).
+		Where("id = ?", userID).
+		Update("role_id", roleID).Error
 }
