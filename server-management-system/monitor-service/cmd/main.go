@@ -71,6 +71,14 @@ func main() {
 	}
 	log.Info().Msg("Elasticsearch client created")
 
+	// ── CRITICAL: Ensure ES index has correct mapping ──
+	// The index MUST be created with "keyword" mapping for server_id, server_name,
+	// status fields BEFORE any documents are bulk-indexed. Otherwise, dynamic mapping
+	// will map them as "text" which breaks terms aggregation in report-service.
+	if err := database.EnsureIndexMapping(context.Background(), esClient, cfg.ES.IndexName); err != nil {
+		log.Fatal().Err(err).Msg("Failed to ensure Elasticsearch index mapping")
+	}
+
 	// 6. Connect Kafka
 	brokers := strings.Split(cfg.Kafka.Brokers, ",")
 

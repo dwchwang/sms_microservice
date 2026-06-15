@@ -49,6 +49,7 @@ GRANT ALL PRIVILEGES ON SCHEMA report_schema TO report_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA report_schema GRANT ALL ON TABLES TO report_user;
 GRANT USAGE ON SCHEMA server_schema TO report_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA server_schema TO report_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA server_schema GRANT SELECT ON TABLES TO report_user;
 
 -- FileIO Service — sở hữu fileio_schema + READ/WRITE trên server_schema
 GRANT ALL PRIVILEGES ON SCHEMA fileio_schema TO fileio_user;
@@ -254,11 +255,13 @@ CREATE TABLE IF NOT EXISTS fileio_schema.import_jobs (
     started_at      TIMESTAMPTZ,
     completed_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON fileio_schema.import_jobs(status);
 CREATE INDEX IF NOT EXISTS idx_import_jobs_created_by ON fileio_schema.import_jobs(created_by);
+CREATE INDEX IF NOT EXISTS idx_import_jobs_deleted_at ON fileio_schema.import_jobs(deleted_at);
 
 CREATE TABLE IF NOT EXISTS fileio_schema.import_job_details (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

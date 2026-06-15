@@ -23,11 +23,14 @@ func NewExportHandler(svc service.ExportService) *ExportHandler {
 
 // ExportServers handles POST /api/v1/servers/export — download servers as .xlsx.
 func (h *ExportHandler) ExportServers(c *gin.Context) {
-	var filter dto.ExportFilter
-	if err := c.ShouldBindJSON(&filter); err != nil {
-		response.Error(c, http.StatusBadRequest, "Invalid request body")
-		return
+	var req dto.ExportRequest
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.Error(c, http.StatusBadRequest, "Invalid request body")
+			return
+		}
 	}
+	filter := req.ToFilter()
 
 	buf, filename, err := h.service.ExportServers(c.Request.Context(), &filter)
 	if err != nil {

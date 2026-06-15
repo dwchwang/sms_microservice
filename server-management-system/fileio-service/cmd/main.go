@@ -116,12 +116,18 @@ func main() {
 
 		log.Info().Str("job_id", jobID).Msg("Received import job from Kafka")
 
-		// Process the import job
+		// Process the import job.
+		// IMPORTANT: ProcessImportJob already updates the job status to "failed"
+		// internally on errors. We MUST return nil here so the Kafka consumer
+		// commits the message and does NOT retry. Retrying would cause
+		// UpdateStatus("processing") to overwrite the "failed" status,
+		// creating an infinite retry loop.
 		if err := importSvc.ProcessImportJob(ctx, jobID); err != nil {
-			log.Error().Err(err).Str("job_id", jobID).Msg("Failed to process import job")
-			return err
+			log.Error().Err(err).Str("job_id", jobID).Msg("Import job failed (already marked as failed in DB)")
+			return nil // <-- commit message, do NOT retry
 		}
 
+		log.Info().Str("job_id", jobID).Msg("Import job completed successfully")
 		return nil
 	})
 
@@ -139,6 +145,8 @@ func main() {
 			log.Error().Err(err).Msg("Kafka consumer stopped with error")
 		}
 	}()
+
+	go recoverStaleImportJobs(ctx, importJobRepo, importSvc, log)
 
 	// 12. Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
@@ -210,3 +218,40 @@ func main() {
 
 // Ensure imports are used
 var _ zerolog.Logger
+
+func recoverStaleImportJobs(ctx context.Context, repo repository.ImportJobRepo, svc service.ImportService, log zerolog.Logger) {
+	const (
+		recoveryDelay = 15 * time.Second
+		staleJobAge   = 5 * time.Minute
+		recoveryLimit = 100
+	)
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(recoveryDelay):
+	}
+
+	cutoff := time.Now().UTC().Add(-staleJobAge)
+	jobs, err := repo.FindStaleIncomplete(ctx, cutoff, recoveryLimit)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to find stale import jobs")
+		return
+	}
+
+	for _, job := range jobs {
+		if ctx.Err() != nil {
+			return
+		}
+
+		jobID := job.ID.String()
+		log.Warn().
+			Str("job_id", jobID).
+			Str("status", job.Status).
+			Time("updated_at", job.UpdatedAt).
+			Msg("Recovering stale import job")
+		if err := svc.ProcessImportJob(ctx, jobID); err != nil {
+			log.Error().Err(err).Str("job_id", jobID).Msg("Failed to recover stale import job")
+		}
+	}
+}

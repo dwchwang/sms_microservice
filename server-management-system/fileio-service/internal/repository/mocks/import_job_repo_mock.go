@@ -2,6 +2,7 @@ package mocks
 
 import (
 	"context"
+	"time"
 
 	"github.com/vcs-sms/fileio-service/internal/model"
 )
@@ -10,6 +11,7 @@ import (
 type ImportJobRepoMock struct {
 	CreateFunc                 func(ctx context.Context, job *model.ImportJob) error
 	FindByIDFunc               func(ctx context.Context, jobID string) (*model.ImportJob, error)
+	FindStaleIncompleteFunc    func(ctx context.Context, cutoff time.Time, limit int) ([]model.ImportJob, error)
 	UpdateStatusFunc           func(ctx context.Context, jobID string, status string) error
 	UpdateCompletedFunc        func(ctx context.Context, jobID string, totalRows, successCount, failedCount int) error
 	UpdateFailedFunc           func(ctx context.Context, jobID string, errMsg string) error
@@ -29,6 +31,13 @@ func (m *ImportJobRepoMock) Create(ctx context.Context, job *model.ImportJob) er
 func (m *ImportJobRepoMock) FindByID(ctx context.Context, jobID string) (*model.ImportJob, error) {
 	if m.FindByIDFunc != nil {
 		return m.FindByIDFunc(ctx, jobID)
+	}
+	return nil, nil
+}
+
+func (m *ImportJobRepoMock) FindStaleIncomplete(ctx context.Context, cutoff time.Time, limit int) ([]model.ImportJob, error) {
+	if m.FindStaleIncompleteFunc != nil {
+		return m.FindStaleIncompleteFunc(ctx, cutoff, limit)
 	}
 	return nil, nil
 }

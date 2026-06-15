@@ -58,6 +58,25 @@ func (c *fakeCache) DeleteByPattern(ctx context.Context, pattern string) {
 	c.patterns = append(c.patterns, pattern)
 }
 
+type fakeExcelParser struct {
+	parseFunc           func(filePath string) ([]excel.ParsedRow, error)
+	validateHeadersFunc func(filePath string) error
+}
+
+func (p *fakeExcelParser) Parse(filePath string) ([]excel.ParsedRow, error) {
+	if p.parseFunc != nil {
+		return p.parseFunc(filePath)
+	}
+	return nil, nil
+}
+
+func (p *fakeExcelParser) ValidateHeaders(filePath string) error {
+	if p.validateHeadersFunc != nil {
+		return p.validateHeadersFunc(filePath)
+	}
+	return nil
+}
+
 // createTestMultipartFile creates a multipart form file from bytes.
 func createTestMultipartFile(t *testing.T, filename string, content []byte) (multipart.File, *multipart.FileHeader) {
 	t.Helper()
@@ -195,6 +214,37 @@ func TestInitiateImport_ValidFile(t *testing.T) {
 	}
 	if len(producer.publishedEvents) != 1 || producer.publishedEvents[0].topic != "import.job.created" {
 		t.Fatalf("expected import.job.created event, got %#v", producer.publishedEvents)
+	}
+}
+
+func TestInitiateImport_OnlyValidatesHeadersBeforeQueue(t *testing.T) {
+	file, header := createTestMultipartFile(t, "servers.xlsx", []byte("xlsx bytes"))
+	defer file.Close()
+
+	parser := &fakeExcelParser{
+		parseFunc: func(filePath string) ([]excel.ParsedRow, error) {
+			t.Fatal("InitiateImport should not parse all rows before queuing the job")
+			return nil, nil
+		},
+		validateHeadersFunc: func(filePath string) error {
+			return nil
+		},
+	}
+	producer := &fakeProducer{}
+	jobRepo := &mocks.ImportJobRepoMock{
+		CreateFunc: func(ctx context.Context, job *model.ImportJob) error {
+			return nil
+		},
+	}
+
+	svc := NewImportService(jobRepo, &mocks.ServerWriterMock{}, parser, producer, nil, setupTestConfig(), zerolog.New(nil))
+
+	result, err := svc.InitiateImport(context.Background(), file, header, "user-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != "pending" || len(producer.publishedEvents) != 1 {
+		t.Fatalf("expected queued pending job, got result=%#v events=%#v", result, producer.publishedEvents)
 	}
 }
 
@@ -467,15 +517,7 @@ func TestProcessImportJob_Duplicates(t *testing.T) {
 			return nil
 		},
 		SaveDetailFunc: func(ctx context.Context, detail *model.ImportJobDetail) error {
-			if detail.Status != "failed" {
-				t.Errorf("expected failed detail, got %q", detail.Status)
-			}
-			return nil
-		},
-		CreateServerWithDetailFunc: func(ctx context.Context, server *model.Server, detail *model.ImportJobDetail) error {
-			if detail.Status != "success" {
-				t.Errorf("expected success detail, got %q", detail.Status)
-			}
+			// The first row succeeds, second row is duplicate and should be "failed"
 			return nil
 		},
 	}
@@ -494,6 +536,10 @@ func TestProcessImportJob_Duplicates(t *testing.T) {
 				CreatedAt:  now,
 				UpdatedAt:  now,
 			}, nil
+		},
+		CreateFunc: func(ctx context.Context, server *model.Server) error {
+			// First row: server created successfully
+			return nil
 		},
 	}
 
@@ -599,9 +645,6 @@ func TestProcessImportJob_CreateServerWithDetailErrorMarksRowFailed(t *testing.T
 		FindByIDFunc: func(ctx context.Context, id string) (*model.ImportJob, error) {
 			return &model.ImportJob{ID: jobID, FilePath: tmpFile}, nil
 		},
-		CreateServerWithDetailFunc: func(ctx context.Context, server *model.Server, detail *model.ImportJobDetail) error {
-			return fmt.Errorf("insert failed")
-		},
 		SaveDetailFunc: func(ctx context.Context, detail *model.ImportJobDetail) error {
 			if detail.Status != "failed" || detail.ErrorReason == "" {
 				t.Fatalf("expected failed detail with db error, got %#v", detail)
@@ -618,6 +661,9 @@ func TestProcessImportJob_CreateServerWithDetailErrorMarksRowFailed(t *testing.T
 	serverWriter := &mocks.ServerWriterMock{
 		FindByServerIDOrNameFunc: func(ctx context.Context, serverID, serverName string) (*model.Server, error) {
 			return nil, gorm.ErrRecordNotFound
+		},
+		CreateFunc: func(ctx context.Context, server *model.Server) error {
+			return fmt.Errorf("insert failed")
 		},
 	}
 

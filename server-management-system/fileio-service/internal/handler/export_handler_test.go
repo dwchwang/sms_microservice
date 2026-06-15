@@ -27,12 +27,22 @@ func (s *fakeExportService) ExportServers(ctx context.Context, filter *dto.Expor
 }
 
 func TestExportHandler_ValidRequest(t *testing.T) {
-	body := `{"status":"on","sort_by":"server_name","sort_order":"asc"}`
+	body := `{"status":"on","sort_by":"server_name","sort_order":"asc","page":2,"page_size":50}`
 	req := httptest.NewRequest("POST", "/api/v1/servers/export", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	router := setupTestRouter()
-	svc := &fakeExportService{}
+	svc := &fakeExportService{
+		exportFunc: func(ctx context.Context, filter *dto.ExportFilter) (*bytes.Buffer, string, error) {
+			if filter.Status != "on" || filter.SortBy != "server_name" || filter.SortOrder != "asc" {
+				t.Fatalf("unexpected filter fields: %#v", filter)
+			}
+			if filter.Page != 2 || filter.PageSize != 50 {
+				t.Fatalf("expected pagination 2/50, got %d/%d", filter.Page, filter.PageSize)
+			}
+			return bytes.NewBuffer([]byte("test-xlsx-content")), "servers_export_20260611_000000.xlsx", nil
+		},
+	}
 	h := NewExportHandler(svc)
 	router.POST("/api/v1/servers/export", h.ExportServers)
 
@@ -51,6 +61,34 @@ func TestExportHandler_ValidRequest(t *testing.T) {
 	contentDisposition := rec.Header().Get("Content-Disposition")
 	if !strings.Contains(contentDisposition, "attachment") {
 		t.Errorf("expected attachment in Content-Disposition, got %q", contentDisposition)
+	}
+}
+
+func TestExportHandler_LegacyNestedFilterRequest(t *testing.T) {
+	body := `{"filter":{"status":"off","location":"DC-HN"},"sort_by":"server_name","page":1,"page_size":25}`
+	req := httptest.NewRequest("POST", "/api/v1/servers/export", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	router := setupTestRouter()
+	svc := &fakeExportService{
+		exportFunc: func(ctx context.Context, filter *dto.ExportFilter) (*bytes.Buffer, string, error) {
+			if filter.Status != "off" || filter.Location != "DC-HN" {
+				t.Fatalf("unexpected nested filter fields: %#v", filter)
+			}
+			if filter.SortBy != "server_name" || filter.Page != 1 || filter.PageSize != 25 {
+				t.Fatalf("unexpected sort/page fields: %#v", filter)
+			}
+			return bytes.NewBuffer([]byte("test-xlsx-content")), "servers_export_20260611_000000.xlsx", nil
+		},
+	}
+	h := NewExportHandler(svc)
+	router.POST("/api/v1/servers/export", h.ExportServers)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

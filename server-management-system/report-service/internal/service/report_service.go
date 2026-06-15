@@ -36,6 +36,7 @@ type reportService struct {
 	cache          summaryCache
 	smtpAdminEmail string
 	logger         zerolog.Logger
+	clock          func() time.Time
 }
 
 type summaryCache interface {
@@ -80,16 +81,21 @@ func NewReportService(
 		cache:          cache,
 		smtpAdminEmail: cfg.AdminEmail,
 		logger:         logger,
+		clock:          time.Now,
 	}
 }
 
 // GetSummary retrieves uptime summary with Redis cache-aside.
 func (s *reportService) GetSummary(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
+	useCache := shouldUseSummaryCache(startDate, endDate, s.now())
+
 	// 1. Check Redis cache
-	cached, err := s.getCachedSummary(ctx, startDate, endDate)
-	if err == nil && cached != nil {
-		s.logger.Debug().Msg("Report summary cache hit")
-		return cached, nil
+	if useCache {
+		cached, err := s.getCachedSummary(ctx, startDate, endDate)
+		if err == nil && cached != nil {
+			s.logger.Debug().Msg("Report summary cache hit")
+			return cached, nil
+		}
 	}
 
 	// 2. Cache miss — query ES
@@ -120,7 +126,9 @@ func (s *reportService) GetSummary(ctx context.Context, startDate, endDate time.
 	}
 
 	// 4. Cache the complete summary.
-	s.setCachedSummary(ctx, startDate, endDate, summary)
+	if useCache {
+		s.setCachedSummary(ctx, startDate, endDate, summary)
+	}
 
 	return summary, nil
 }
@@ -336,6 +344,13 @@ func (s *reportService) markJobFailed(ctx context.Context, job *model.ReportJob,
 	}
 }
 
+func (s *reportService) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
 func parseReportDateRange(startDateStr, endDateStr string) (time.Time, time.Time, time.Time, error) {
 	startDate, err := time.Parse("2006-01-02", startDateStr)
 	if err != nil {
@@ -387,4 +402,16 @@ func (c *redisSummaryCache) Set(ctx context.Context, startDate, endDate time.Tim
 func reportSummaryCacheKey(startDate, endDate time.Time) string {
 	reportEndDate := endDate.AddDate(0, 0, -1)
 	return fmt.Sprintf("report:summary:%s:%s", startDate.Format("2006-01-02"), reportEndDate.Format("2006-01-02"))
+}
+
+func shouldUseSummaryCache(startDate, endDate, now time.Time) bool {
+	if endDate.IsZero() {
+		return false
+	}
+
+	nowUTC := now.UTC()
+	todayStart := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC)
+	queryEnd := endDate.UTC()
+
+	return !queryEnd.After(todayStart)
 }

@@ -14,6 +14,7 @@ import (
 type ImportJobRepo interface {
 	Create(ctx context.Context, job *model.ImportJob) error
 	FindByID(ctx context.Context, jobID string) (*model.ImportJob, error)
+	FindStaleIncomplete(ctx context.Context, cutoff time.Time, limit int) ([]model.ImportJob, error)
 	UpdateStatus(ctx context.Context, jobID string, status string) error
 	UpdateCompleted(ctx context.Context, jobID string, totalRows, successCount, failedCount int) error
 	UpdateFailed(ctx context.Context, jobID string, errMsg string) error
@@ -51,6 +52,21 @@ func (r *importJobRepo) FindByID(ctx context.Context, jobID string) (*model.Impo
 		return nil, err
 	}
 	return &job, nil
+}
+
+// FindStaleIncomplete returns old jobs that did not reach a terminal state.
+func (r *importJobRepo) FindStaleIncomplete(ctx context.Context, cutoff time.Time, limit int) ([]model.ImportJob, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	var jobs []model.ImportJob
+	err := r.db.WithContext(ctx).
+		Where("status IN ? AND updated_at <= ?", []string{"pending", "processing"}, cutoff).
+		Order("updated_at ASC").
+		Limit(limit).
+		Find(&jobs).Error
+	return jobs, err
 }
 
 // UpdateStatus updates only the status field of an import job.

@@ -120,6 +120,29 @@ func TestImportJobRepo_FindByID_InvalidUUID(t *testing.T) {
 	}
 }
 
+func TestImportJobRepo_FindStaleIncomplete(t *testing.T) {
+	db, mock := setupMockDB(t)
+	repo := NewImportJobRepo(db)
+
+	jobID := uuid.New()
+	cutoff := time.Now().UTC().Add(-5 * time.Minute)
+	rows := sqlmock.NewRows([]string{
+		"id", "status", "file_name", "file_path", "total_rows",
+		"success_count", "failed_count", "created_at", "updated_at",
+	}).AddRow(jobID, "pending", "stale.xlsx", "/uploads/stale.xlsx", 0, 0, 0, cutoff.Add(-time.Minute), cutoff.Add(-time.Minute))
+
+	mock.ExpectQuery(`SELECT \* FROM "fileio_schema"."import_jobs"`).
+		WillReturnRows(rows)
+
+	jobs, err := repo.FindStaleIncomplete(context.Background(), cutoff, 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != jobID || jobs[0].Status != "pending" {
+		t.Fatalf("unexpected jobs: %#v", jobs)
+	}
+}
+
 func TestImportJobRepo_UpdateStatus(t *testing.T) {
 	db, mock := setupMockDB(t)
 	repo := NewImportJobRepo(db)

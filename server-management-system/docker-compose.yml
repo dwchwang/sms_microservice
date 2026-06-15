@@ -15,6 +15,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./deployments/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./deployments/docker/postgres/seed_10k_servers.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
       - ./deployments/docker/postgres/seed_10k_servers.sql:/seed/seed_10k_servers.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vcs_admin} -d ${POSTGRES_DB:-vcs_sms}"]
@@ -200,6 +201,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     volumes:
       - ./logs/server:/var/log/vcs-sms
     networks:
@@ -223,6 +226,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
       tcp-simulator:
         condition: service_healthy
     volumes:
@@ -246,6 +251,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     volumes:
       - ./logs/report:/var/log/vcs-sms
     networks:
@@ -265,6 +272,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     volumes:
       - ./logs/fileio:/var/log/vcs-sms
       - ./uploads:/app/uploads

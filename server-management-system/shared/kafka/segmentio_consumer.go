@@ -94,7 +94,7 @@ func (c *SegmentioConsumer) Subscribe(topic, groupID string, handler EventHandle
 		MaxBytes:       10e6, // 10MB
 		MaxWait:        1 * time.Second,
 		CommitInterval: 5 * time.Second,
-		StartOffset:    kafka.LastOffset,
+		StartOffset:    kafka.FirstOffset,
 	})
 
 	c.readers[topic] = r

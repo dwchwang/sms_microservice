@@ -124,6 +124,12 @@ func (s *importServiceImpl) InitiateImport(ctx context.Context, file multipart.F
 		return nil, fmt.Errorf("failed to write uploaded file: %w", err)
 	}
 
+	// 3.5 Quick-validate the workbook and expected headers without parsing all rows.
+	if err := s.parser.ValidateHeaders(filePath); err != nil {
+		os.Remove(filePath) // clean up — invalid file
+		return nil, fmt.Errorf("invalid Excel file: %w", err)
+	}
+
 	// 4. Create import_job record
 	var createdBy *uuid.UUID
 	if uid, err := uuid.Parse(userID); err == nil {
@@ -248,7 +254,7 @@ func (s *importServiceImpl) ProcessImportJob(ctx context.Context, jobID string) 
 			continue
 		}
 
-		// Insert new server
+		// Insert new server via serverWriter (uses server_schema connection)
 		now := time.Now().UTC()
 		server := &model.Server{
 			ServerID:    row.ServerID,
@@ -265,8 +271,7 @@ func (s *importServiceImpl) ProcessImportJob(ctx context.Context, jobID string) 
 			UpdatedAt:   now,
 		}
 
-		detail.Status = "success"
-		if err := s.jobRepo.CreateServerWithDetail(ctx, server, &detail); err != nil {
+		if err := s.serverWriter.Create(ctx, server); err != nil {
 			detail.Status = "failed"
 			detail.ErrorReason = fmt.Sprintf("database error: %v", err)
 			if saveErr := s.jobRepo.SaveDetail(ctx, &detail); saveErr != nil {
@@ -275,6 +280,13 @@ func (s *importServiceImpl) ProcessImportJob(ctx context.Context, jobID string) 
 			}
 			failedCount++
 			continue
+		}
+
+		// Save success detail
+		detail.Status = "success"
+		if err := s.jobRepo.SaveDetail(ctx, &detail); err != nil {
+			// Detail save failed but server was created — log and continue
+			s.log.Warn().Err(err).Str("server_id", row.ServerID).Msg("Server created but failed to save detail record")
 		}
 
 		s.publishServerCreated(ctx, row.ServerID, server)

@@ -76,18 +76,18 @@ components:
           type: string
           minLength: 3
           maxLength: 100
-          example: admin01
+          example: newuser
         email:
           type: string
           format: email
-          example: admin@example.com
+          example: user@example.com
         password:
           type: string
           minLength: 8
-          example: "SecureP@ss123"
+          example: "Pass@123"
         full_name:
           type: string
-          example: "Nguyen Van A"
+          example: "New User"
 
     LoginRequest:
       type: object
@@ -95,10 +95,10 @@ components:
       properties:
         username:
           type: string
-          example: admin01
+          example: admin
         password:
           type: string
-          example: "SecureP@ss123"
+          example: "Admin@123456"
 
     TokenResponse:
       type: object
@@ -404,21 +404,24 @@ components:
 
     ExportRequest:
       type: object
+      description: Export filters are sent as top-level fields. The service also accepts the legacy nested `filter` object for backward compatibility.
       properties:
-        filter:
-          type: object
-          properties:
-            status:
-              type: string
-              enum: [on, off]
-            server_name:
-              type: string
-            ipv4:
-              type: string
-            location:
-              type: string
-            os:
-              type: string
+        status:
+          type: string
+          enum: [on, off]
+          example: on
+        server_name:
+          type: string
+          example: web
+        ipv4:
+          type: string
+          example: 10.0.1
+        location:
+          type: string
+          example: DC-HN
+        os:
+          type: string
+          example: Ubuntu
         sort_by:
           type: string
           enum: [server_id, server_name, status, ipv4, location, created_at, updated_at]
@@ -427,6 +430,15 @@ components:
           type: string
           enum: [asc, desc]
           example: desc
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          example: 100
 
     # ── Report ──
     ReportSummaryResponse:

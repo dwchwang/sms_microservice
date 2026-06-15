@@ -52,13 +52,14 @@ func NewHealthCheckScheduler(
 }
 
 // Start begins the cron loop. Runs immediately on start, then every interval.
+// Panic recovery ensures a single bad cycle doesn't crash the entire scheduler.
 func (s *HealthCheckScheduler) Start(ctx context.Context) {
 	s.logger.Info().
 		Dur("interval", s.interval).
 		Msg("Health-check scheduler started")
 
-	// Run immediately on start
-	s.runCycle(ctx)
+	// Run immediately on start (with panic recovery)
+	s.runCycleSafe(ctx)
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -69,9 +70,22 @@ func (s *HealthCheckScheduler) Start(ctx context.Context) {
 			s.logger.Info().Msg("Health-check scheduler stopped")
 			return
 		case <-ticker.C:
-			s.runCycle(ctx)
+			s.runCycleSafe(ctx)
 		}
 	}
+}
+
+// runCycleSafe wraps runCycle with panic recovery to prevent a single
+// panic from crashing the entire scheduler goroutine.
+func (s *HealthCheckScheduler) runCycleSafe(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error().
+				Interface("panic", r).
+				Msg("Health-check cycle panicked — recovered, scheduler will continue on next tick")
+		}
+	}()
+	s.runCycle(ctx)
 }
 
 // runCycle performs one full health-check cycle.

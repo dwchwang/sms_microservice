@@ -20,10 +20,13 @@ import (
 type fakeSummaryCache struct {
 	summary *dto.ReportSummaryResponse
 	getErr  error
+	gets    int
+	sets    int
 	setFunc func(ctx context.Context, startDate, endDate time.Time, summary *dto.ReportSummaryResponse) error
 }
 
 func (f *fakeSummaryCache) Get(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
+	f.gets++
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
@@ -31,6 +34,7 @@ func (f *fakeSummaryCache) Get(ctx context.Context, startDate, endDate time.Time
 }
 
 func (f *fakeSummaryCache) Set(ctx context.Context, startDate, endDate time.Time, summary *dto.ReportSummaryResponse) error {
+	f.sets++
 	if f.setFunc != nil {
 		return f.setFunc(ctx, startDate, endDate, summary)
 	}
@@ -223,6 +227,60 @@ func TestGetSummary_CacheHitDoesNotQueryES(t *testing.T) {
 	assert.False(t, esCalled)
 	assert.Equal(t, 10, summary.TotalServers)
 	assert.Len(t, summary.LowUptimeServers, 1)
+}
+
+func TestShouldUseSummaryCache_BypassesRangesIncludingToday(t *testing.T) {
+	now := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
+
+	historicalStart := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	historicalEnd := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
+	assert.True(t, shouldUseSummaryCache(historicalStart, historicalEnd, now))
+
+	currentStart := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
+	currentEnd := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
+	assert.False(t, shouldUseSummaryCache(currentStart, currentEnd, now))
+}
+
+func TestGetSummary_BypassesCacheForCurrentDayRange(t *testing.T) {
+	esCalled := false
+	esMock := &repoMocks.UptimeCalculatorMock{
+		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
+			esCalled = true
+			return &dto.ReportSummaryResponse{
+				TotalServers: 100,
+				ServersOn:    80,
+				ServersOff:   20,
+				AvgUptimePct: 80,
+			}, nil
+		},
+		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
+			return nil, nil
+		},
+	}
+	cache := &fakeSummaryCache{summary: &dto.ReportSummaryResponse{
+		TotalServers: 10,
+		ServersOn:    9,
+		ServersOff:   1,
+		AvgUptimePct: 90,
+	}}
+	svc := &reportService{
+		esUptimeRepo: esMock,
+		cache:        cache,
+		logger:       zerolog.Nop(),
+		clock: func() time.Time {
+			return time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
+		},
+	}
+
+	start := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
+	summary, err := svc.GetSummary(context.Background(), start, end)
+
+	assert.NoError(t, err)
+	assert.True(t, esCalled)
+	assert.Equal(t, 0, cache.gets)
+	assert.Equal(t, 0, cache.sets)
+	assert.Equal(t, 100, summary.TotalServers)
 }
 
 func TestGetSummary_CacheMissStoresCompleteSummary(t *testing.T) {

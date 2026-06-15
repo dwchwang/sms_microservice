@@ -50,14 +50,15 @@ func (r *serverWriter) Create(ctx context.Context, server *model.Server) error {
 	return r.db.WithContext(ctx).Create(server).Error
 }
 
-// FindAllWithFilter retrieves all servers matching the filter, sorted.
-// Used for export — no pagination.
+// FindAllWithFilter retrieves all servers matching the filter, sorted, with pagination.
+// Used for export. When Page and PageSize are both > 0, results are paginated.
 func (r *serverWriter) FindAllWithFilter(ctx context.Context, filter *dto.ExportFilter) ([]model.Server, error) {
 	var servers []model.Server
 
 	query := r.db.WithContext(ctx).Model(&model.Server{})
 
-	// Apply filters
+	// Apply filters — use exact match (NOT ILIKE) for status to ensure
+	// filtering by "on" returns only online servers, not all servers.
 	if filter.Status != "" {
 		query = query.Where("status = ?", filter.Status)
 	}
@@ -89,8 +90,14 @@ func (r *serverWriter) FindAllWithFilter(ctx context.Context, filter *dto.Export
 	}
 	query = query.Order(fmt.Sprintf("%s %s", sortBy, sortOrder))
 
-	// Limit export to prevent memory issues
-	query = query.Limit(50000)
+	// Apply pagination if both page and page_size are provided
+	if filter.Page > 0 && filter.PageSize > 0 {
+		offset := (filter.Page - 1) * filter.PageSize
+		query = query.Offset(offset).Limit(filter.PageSize)
+	} else {
+		// No pagination — apply a generous limit to prevent memory issues
+		query = query.Limit(50000)
+	}
 
 	err := query.Find(&servers).Error
 	return servers, err

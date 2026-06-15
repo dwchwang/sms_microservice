@@ -38,6 +38,8 @@ func (p *Pool) WorkerCount() int {
 
 // Execute runs health-checks on all servers concurrently using the worker pool.
 // Returns results and an error if context was cancelled before all servers were checked.
+// Each worker runs with panic recovery to prevent a single server check from
+// crashing the entire pool.
 func (p *Pool) Execute(ctx context.Context, servers []*checker.ServerInfo) ([]*checker.HealthResult, error) {
 	if len(servers) == 0 {
 		return nil, nil
@@ -52,6 +54,14 @@ func (p *Pool) Execute(ctx context.Context, servers []*checker.ServerInfo) ([]*c
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					p.logger.Error().
+						Int("worker_id", workerID).
+						Interface("panic", r).
+						Msg("Worker panic recovered — continuing with remaining workers")
+				}
+			}()
 			for server := range jobs {
 				select {
 				case <-ctx.Done():
