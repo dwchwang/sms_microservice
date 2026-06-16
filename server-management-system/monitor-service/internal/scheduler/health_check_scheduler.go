@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,14 +53,34 @@ func NewHealthCheckScheduler(
 }
 
 // Start begins the cron loop. Runs immediately on start, then every interval.
-// Panic recovery ensures a single bad cycle doesn't crash the entire scheduler.
+//
+// Each cycle runs in its own goroutine guarded by an atomic flag, so:
+//   - the ticker channel is never blocked by a long cycle (no swallowed ticks),
+//   - if a previous cycle is still running when the next tick fires, that tick is
+//     skipped and logged (instead of silently queueing back-to-back cycles),
+//   - ctx cancellation is always handled promptly.
+//
+// Panic recovery ensures a single bad cycle doesn't crash the scheduler.
 func (s *HealthCheckScheduler) Start(ctx context.Context) {
 	s.logger.Info().
 		Dur("interval", s.interval).
 		Msg("Health-check scheduler started")
 
-	// Run immediately on start (with panic recovery)
-	s.runCycleSafe(ctx)
+	var running int32
+
+	tick := func() {
+		if !atomic.CompareAndSwapInt32(&running, 0, 1) {
+			s.logger.Warn().Msg("Previous health-check cycle still running — skipping this tick")
+			return
+		}
+		go func() {
+			defer atomic.StoreInt32(&running, 0)
+			s.runCycleSafe(ctx)
+		}()
+	}
+
+	// Run immediately on start.
+	tick()
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -70,7 +91,7 @@ func (s *HealthCheckScheduler) Start(ctx context.Context) {
 			s.logger.Info().Msg("Health-check scheduler stopped")
 			return
 		case <-ticker.C:
-			s.runCycleSafe(ctx)
+			tick()
 		}
 	}
 }

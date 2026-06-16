@@ -44,6 +44,8 @@ tags:
     description: Import/Export Excel
   - name: Reports
     description: Báo cáo & Email
+  - name: Users
+    description: Quản lý người dùng (Admin only)
 
 # ═══════════════════════════════════════
 # Security
@@ -74,18 +76,18 @@ components:
           type: string
           minLength: 3
           maxLength: 100
-          example: admin01
+          example: newuser
         email:
           type: string
           format: email
-          example: admin@example.com
+          example: user@example.com
         password:
           type: string
           minLength: 8
-          example: "SecureP@ss123"
+          example: "Pass@123"
         full_name:
           type: string
-          example: "Nguyen Van A"
+          example: "New User"
 
     LoginRequest:
       type: object
@@ -93,10 +95,10 @@ components:
       properties:
         username:
           type: string
-          example: admin01
+          example: admin
         password:
           type: string
-          example: "SecureP@ss123"
+          example: "Admin@123456"
 
     TokenResponse:
       type: object
@@ -156,6 +158,37 @@ components:
         created_at:
           type: string
           format: date-time
+
+    # ── User Management ──
+    UpdateUserRoleRequest:
+      type: object
+      required: [role_name]
+      properties:
+        role_name:
+          type: string
+          enum: [admin, operator, viewer]
+          description: "Vai trò mới cho user"
+          example: operator
+
+    UserListResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 42
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+        total_pages:
+          type: integer
+          example: 3
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserProfile'
 
     # ── Server ──
     CreateServerRequest:
@@ -371,21 +404,24 @@ components:
 
     ExportRequest:
       type: object
+      description: Export filters are sent as top-level fields. The service also accepts the legacy nested `filter` object for backward compatibility.
       properties:
-        filter:
-          type: object
-          properties:
-            status:
-              type: string
-              enum: [on, off]
-            server_name:
-              type: string
-            ipv4:
-              type: string
-            location:
-              type: string
-            os:
-              type: string
+        status:
+          type: string
+          enum: [on, off]
+          example: on
+        server_name:
+          type: string
+          example: web
+        ipv4:
+          type: string
+          example: 10.0.1
+        location:
+          type: string
+          example: DC-HN
+        os:
+          type: string
+          example: Ubuntu
         sort_by:
           type: string
           enum: [server_id, server_name, status, ipv4, location, created_at, updated_at]
@@ -394,6 +430,15 @@ components:
           type: string
           enum: [asc, desc]
           example: desc
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          example: 100
 
     # ── Report ──
     ReportSummaryResponse:
@@ -696,6 +741,121 @@ paths:
                         $ref: '#/components/schemas/UserProfile'
         '401':
           description: Token không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ═══ USERS ═══
+  /auth/users:
+    get:
+      tags: [Users]
+      summary: Lấy danh sách người dùng (Admin only)
+      description: |
+        **Scope:** `user:manage`
+        **Role:** Admin only
+      operationId: listUsers
+      security:
+        - BearerAuth: [user:manage]
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Trang hiện tại
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Số lượng user mỗi trang
+      responses:
+        '200':
+          description: Danh sách người dùng
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserListResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `user:manage`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/users/{user_id}/role:
+    put:
+      tags: [Users]
+      summary: Thay đổi role của người dùng (Admin only)
+      description: |
+        Admin có thể nâng cấp hoặc hạ cấp role của user khác.
+        Không thể tự thay đổi role của chính mình.
+        **Scope:** `user:manage`
+        **Role:** Admin only
+      operationId: updateUserRole
+      security:
+        - BearerAuth: [user:manage]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRoleRequest'
+      responses:
+        '200':
+          description: Role đã được cập nhật
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserProfile'
+        '400':
+          description: Không thể tự đổi role của mình hoặc request không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Không có scope `user:manage`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: User không tồn tại
           content:
             application/json:
               schema:

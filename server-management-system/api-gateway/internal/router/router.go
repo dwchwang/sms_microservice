@@ -72,11 +72,10 @@ func SetupRouter(cfg *config.Config, redisClient *redis.Client) *gin.Engine {
 				proxy.NewReverseProxy(cfg.ReportServiceURL))
 		}
 
-		// Monitor endpoints (Phase 2)
+		// Monitor endpoints (Phase 2) — authenticated only (per architecture.md §4.1).
 		monitor := protected.Group("/monitor")
 		{
-			monitor.GET("/status", middleware.ScopeMiddleware("monitor:view"),
-				proxy.NewReverseProxy(cfg.MonitorServiceURL))
+			monitor.GET("/status", proxy.NewReverseProxy(cfg.MonitorServiceURL))
 		}
 
 		// Auth endpoints that require a valid JWT.

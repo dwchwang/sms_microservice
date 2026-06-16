@@ -3,6 +3,7 @@ package database
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/vcs-sms/monitor-service/config"
 	"gorm.io/driver/postgres"
@@ -31,6 +32,12 @@ func Connect(cfg config.DatabaseConfig) *gorm.DB {
 	}
 	sqlDB.SetMaxOpenConns(25)
 	sqlDB.SetMaxIdleConns(10)
+	// Recycle connections so the long-running health-check loop never reuses a
+	// connection that Postgres/Docker/NAT has silently dropped. Without this,
+	// a stale pooled connection makes GetAllActiveServers fail every cycle and
+	// the reader appears to "stop updating".
+	sqlDB.SetConnMaxLifetime(5 * time.Minute)
+	sqlDB.SetConnMaxIdleTime(1 * time.Minute)
 
 	fmt.Println("[DB] Connected to PostgreSQL successfully")
 	return db
