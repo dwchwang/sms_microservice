@@ -105,11 +105,11 @@ CREATE INDEX IF NOT EXISTS idx_users_role_id
 -- Seed roles
 INSERT INTO auth_schema.roles (id, name, description) VALUES
     ('a0000000-0000-0000-0000-000000000001', 'admin',    'Full access to all resources'),
-    ('a0000000-0000-0000-0000-000000000002', 'operator', 'Can read and update servers, view reports'),
-    ('a0000000-0000-0000-0000-000000000003', 'viewer',   'Read-only access')
+    ('a0000000-0000-0000-0000-000000000002', 'operator', 'Can operate servers, reports, and monitor status'),
+    ('a0000000-0000-0000-0000-000000000003', 'viewer',   'Read-only access with export permission')
 ON CONFLICT (name) DO NOTHING;
 
--- Seed role permissions (10 scopes for admin)
+-- Seed role permissions
 INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
     ('a0000000-0000-0000-0000-000000000001', 'server:create'),
     ('a0000000-0000-0000-0000-000000000001', 'server:read'),
@@ -121,14 +121,18 @@ INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
     ('a0000000-0000-0000-0000-000000000001', 'report:view'),
     ('a0000000-0000-0000-0000-000000000001', 'report:send'),
     ('a0000000-0000-0000-0000-000000000001', 'user:manage'),
-    -- Operator permissions (4 scopes)
+    -- Operator permissions
+    ('a0000000-0000-0000-0000-000000000002', 'server:create'),
     ('a0000000-0000-0000-0000-000000000002', 'server:read'),
     ('a0000000-0000-0000-0000-000000000002', 'server:update'),
+    ('a0000000-0000-0000-0000-000000000002', 'server:import'),
+    ('a0000000-0000-0000-0000-000000000002', 'server:export'),
     ('a0000000-0000-0000-0000-000000000002', 'monitor:view'),
     ('a0000000-0000-0000-0000-000000000002', 'report:view'),
-    -- Viewer permissions (3 scopes)
+    ('a0000000-0000-0000-0000-000000000002', 'report:send'),
+    -- Viewer permissions
     ('a0000000-0000-0000-0000-000000000003', 'server:read'),
-    ('a0000000-0000-0000-0000-000000000003', 'monitor:view'),
+    ('a0000000-0000-0000-0000-000000000003', 'server:export'),
     ('a0000000-0000-0000-0000-000000000003', 'report:view')
 ON CONFLICT (role_id, scope) DO NOTHING;
 

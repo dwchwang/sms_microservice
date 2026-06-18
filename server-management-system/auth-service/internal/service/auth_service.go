@@ -30,9 +30,17 @@ type AuthService interface {
 // authServiceImpl implements AuthService.
 type authServiceImpl struct {
 	repo   repository.UserRepository
-	redis  *redis.Client
+	redis  redisCommander
 	jwtCfg config.JWTConfig
 	secret string
+}
+
+type redisCommander interface {
+	Get(ctx context.Context, key string) *redis.StringCmd
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
+	Incr(ctx context.Context, key string) *redis.IntCmd
+	Expire(ctx context.Context, key string, expiration time.Duration) *redis.BoolCmd
 }
 
 // NewAuthService creates a new AuthService instance.

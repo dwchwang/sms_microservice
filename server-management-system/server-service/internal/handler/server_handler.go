@@ -81,6 +81,7 @@ func (h *ServerHandler) GetServer(c *gin.Context) {
 // @Produce json
 // @Security BearerAuth
 // @Param status query string false "Filter by status"
+// @Param server_id query string false "Filter by server ID (partial match)"
 // @Param server_name query string false "Filter by server name (partial match)"
 // @Param ipv4 query string false "Filter by IPv4 prefix"
 // @Param os query string false "Filter by OS"

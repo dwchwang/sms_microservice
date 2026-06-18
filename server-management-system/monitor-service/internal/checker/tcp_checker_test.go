@@ -166,3 +166,35 @@ func TestTCPChecker_ServerFields(t *testing.T) {
 		t.Errorf("CheckMethod should be 'tcp', got '%s'", result.CheckMethod)
 	}
 }
+
+func TestTCPChecker_DialHostOverride(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to start listener: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			conn.Close()
+		}
+	}()
+
+	addr := ln.Addr().(*net.TCPAddr)
+	checker := NewTCPChecker(2*time.Second, "127.0.0.1")
+
+	server := &ServerInfo{
+		ServerID:   "SRV-PRIVATE-IP",
+		ServerName: "Private IP Server",
+		IPv4:       "10.10.1.11",
+		TCPPort:    addr.Port,
+		UptimeRate: 0.95,
+	}
+
+	result := checker.Check(context.Background(), server)
+
+	if result.Status != "on" {
+		t.Errorf("Expected status 'on' through dial host override, got '%s' (%s)", result.Status, result.Error)
+	}
+}

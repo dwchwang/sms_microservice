@@ -58,8 +58,11 @@ src/
 |---|:-:|:-:|:-:|
 | Xem server / báo cáo | ✅ | ✅ | ✅ |
 | Sửa server | ✅ | ✅ | ❌ |
-| Tạo / Xoá / Import / Export server | ✅ | ❌ | ❌ |
-| Gửi báo cáo email | ✅ | ❌ | ❌ |
+| Tạo / Import server | ✅ | ✅ | ❌ |
+| Export server | ✅ | ✅ | ✅ |
+| Xoá server | ✅ | ❌ | ❌ |
+| Xem monitor hệ thống | ✅ | ✅ | ❌ |
+| Gửi báo cáo email | ✅ | ✅ | ❌ |
 | Quản lý người dùng | ✅ | ❌ | ❌ |
 
 UI **ẩn** action không có scope; backend vẫn chặn 403 (lớp bảo vệ thật).
@@ -70,5 +73,5 @@ UI **ẩn** action không có scope; backend vẫn chặn 403 (lớp bảo vệ 
 - Response bọc `{ status, code, message, data, meta }`; `code` = HTTP status. Payload ở `data.data`.
 - **Export**: filename đọc từ header `Content-Disposition` (gateway đã expose header này;
   nếu không, FE tự sinh `servers_export_<timestamp>.xlsx`).
-- **Monitor widget**: cần scope `monitor:view`. Đã seed cho admin trong migration
-  `000002_create_role_permissions.up.sql`. DB cũ cần grant thủ công, nếu không widget tự ẩn khi 403.
+- **Monitor widget**: cần scope `monitor:view`. Đã seed cho admin/operator trong migration
+  `000002_create_role_permissions.up.sql` và được reconcile bằng `000004_reconcile_role_permissions.up.sql`.

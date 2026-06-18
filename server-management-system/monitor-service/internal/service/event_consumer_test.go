@@ -165,6 +165,46 @@ func TestHandleServerDeleted_InvalidData(t *testing.T) {
 	}
 }
 
+func TestHandleServerDeleted_MissingServerID(t *testing.T) {
+	mockRepo := &mocks.HealthCheckConfigRepoMock{}
+	consumer := NewEventConsumer(mockRepo, config.MonitorConfig{}, zerolog.Nop())
+
+	event := &kafka.Event{
+		EventID:   "evt-missing-delete",
+		EventType: "server.deleted",
+		Source:    "server-service",
+		Data:      map[string]interface{}{},
+	}
+
+	err := consumer.HandleServerDeleted(context.Background(), event)
+	if err == nil {
+		t.Error("Expected error for missing server_id, got nil")
+	}
+}
+
+func TestHandleServerDeleted_RepoError(t *testing.T) {
+	mockRepo := &mocks.HealthCheckConfigRepoMock{
+		DisableByServerIDFunc: func(ctx context.Context, serverID string) error {
+			return fmt.Errorf("db connection lost")
+		},
+	}
+	consumer := NewEventConsumer(mockRepo, config.MonitorConfig{}, zerolog.Nop())
+
+	event := &kafka.Event{
+		EventID:   "evt-delete-error",
+		EventType: "server.deleted",
+		Source:    "server-service",
+		Data: map[string]interface{}{
+			"server_id": "SRV-00001",
+		},
+	}
+
+	err := consumer.HandleServerDeleted(context.Background(), event)
+	if err == nil {
+		t.Error("Expected repo error, got nil")
+	}
+}
+
 func TestHandleServerCreated_RepoError(t *testing.T) {
 	mockRepo := &mocks.HealthCheckConfigRepoMock{
 		CreateFunc: func(ctx context.Context, config *model.HealthCheckConfig) error {

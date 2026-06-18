@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"strconv"
 	"time"
 
@@ -9,14 +10,35 @@ import (
 	"github.com/vcs-sms/shared/response"
 )
 
+type rateLimitStore interface {
+	Incr(ctx context.Context, key string) (int64, error)
+	Expire(ctx context.Context, key string, expiration time.Duration) error
+}
+
+type redisRateLimitStore struct {
+	client *redis.Client
+}
+
+func (s *redisRateLimitStore) Incr(ctx context.Context, key string) (int64, error) {
+	return s.client.Incr(ctx, key).Result()
+}
+
+func (s *redisRateLimitStore) Expire(ctx context.Context, key string, expiration time.Duration) error {
+	return s.client.Expire(ctx, key, expiration).Err()
+}
+
 // RateLimiterMiddleware implements a sliding window rate limiter using Redis.
 func RateLimiterMiddleware(redisClient *redis.Client, limit int, window time.Duration) gin.HandlerFunc {
+	return rateLimiterMiddleware(&redisRateLimitStore{client: redisClient}, limit, window)
+}
+
+func rateLimiterMiddleware(store rateLimitStore, limit int, window time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		key := "rate:limit:" + ip
 
 		// Redis INCR + EXPIRE pattern
-		count, err := redisClient.Incr(c.Request.Context(), key).Result()
+		count, err := store.Incr(c.Request.Context(), key)
 		if err != nil {
 			// Redis unavailable — fail closed to prevent unbounded requests
 			response.Error(c, 503, "Service temporarily unavailable")
@@ -25,7 +47,7 @@ func RateLimiterMiddleware(redisClient *redis.Client, limit int, window time.Dur
 		}
 
 		if count == 1 {
-			redisClient.Expire(c.Request.Context(), key, window)
+			_ = store.Expire(c.Request.Context(), key, window)
 		}
 
 		remaining := limit - int(count)

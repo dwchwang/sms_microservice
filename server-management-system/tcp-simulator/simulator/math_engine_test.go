@@ -1,6 +1,7 @@
 package simulator
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -123,4 +124,21 @@ func TestMathEngine_BoundaryClamp(t *testing.T) {
 	}
 
 	// If we reach here without panic, test passes
+}
+
+func TestMathEngine_ConcurrentShouldBeOnline(t *testing.T) {
+	engine := NewMathEngine()
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 100; worker++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for i := 0; i < 1000; i++ {
+				_ = engine.ShouldBeOnline(0.95, offset+i)
+			}
+		}(worker * 1000)
+	}
+
+	wg.Wait()
 }

@@ -29,6 +29,7 @@ type UpdateServerRequest struct {
 // ServerFilter holds query parameters for listing servers.
 type ServerFilter struct {
 	Status     string `form:"status"`
+	ServerID   string `form:"server_id"`
 	ServerName string `form:"server_name"`
 	IPv4       string `form:"ipv4"`
 	OS         string `form:"os"`

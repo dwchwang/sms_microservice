@@ -129,7 +129,14 @@ export default function UsersPage() {
       </div>
 
       {data ? (
-        <Pagination page={data.page} totalPages={data.total_pages} total={data.total} onChange={setPage} />
+        <Pagination
+          page={data.page}
+          totalPages={data.total_pages}
+          total={data.total}
+          pageSize={data.page_size}
+          itemLabel="người dùng"
+          onChange={setPage}
+        />
       ) : null}
     </div>
   );

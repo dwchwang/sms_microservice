@@ -47,7 +47,7 @@ export function Sidebar() {
           <span className="grid size-7 place-items-center rounded-sm bg-primary text-xs font-bold text-on-primary">
             VCS
           </span>
-          <span className="text-sm font-medium text-ink">Server Mgmt</span>
+          <span className="text-sm font-medium text-ink">Server Management</span>
         </div>
         <SidebarNav />
       </div>

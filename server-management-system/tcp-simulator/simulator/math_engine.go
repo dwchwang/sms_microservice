@@ -3,6 +3,7 @@ package simulator
 import (
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -10,6 +11,7 @@ import (
 // based on uptime_rate, hourly sin wave variation, and server-specific phase.
 type MathEngine struct {
 	rng *rand.Rand
+	mu  sync.Mutex
 }
 
 // NewMathEngine creates a new MathEngine
@@ -44,5 +46,9 @@ func (e *MathEngine) ShouldBeOnline(uptimeRate float64, serverIndex int) bool {
 	effectiveRate := uptimeRate + hourlyVariation + serverVariation
 	effectiveRate = math.Max(0, math.Min(1, effectiveRate))
 
-	return e.rng.Float64() < effectiveRate
+	e.mu.Lock()
+	r := e.rng.Float64()
+	e.mu.Unlock()
+
+	return r < effectiveRate
 }

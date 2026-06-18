@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -12,6 +13,17 @@ import (
 	"github.com/vcs-sms/fileio-service/internal/model"
 	"github.com/vcs-sms/fileio-service/internal/repository/mocks"
 )
+
+type fakeExcelGenerator struct {
+	err error
+}
+
+func (g fakeExcelGenerator) Generate(servers []dto.ServerExportRow) (*bytes.Buffer, error) {
+	if g.err != nil {
+		return nil, g.err
+	}
+	return bytes.NewBufferString("xlsx"), nil
+}
 
 func TestExportServers_NoFilter(t *testing.T) {
 	now := time.Now().UTC()
@@ -126,6 +138,21 @@ func TestExportServers_DBError(t *testing.T) {
 	_, _, err := svc.ExportServers(context.Background(), &dto.ExportFilter{})
 	if err == nil {
 		t.Fatal("expected error for DB failure")
+	}
+}
+
+func TestExportServers_GeneratorError(t *testing.T) {
+	serverWriter := &mocks.ServerWriterMock{
+		FindAllWithFilterFunc: func(ctx context.Context, filter *dto.ExportFilter) ([]model.Server, error) {
+			return []model.Server{{ServerID: "SRV-001", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}, nil
+		},
+	}
+
+	svc := NewExportService(serverWriter, fakeExcelGenerator{err: fmt.Errorf("generate failed")}, zerolog.New(nil))
+
+	_, _, err := svc.ExportServers(context.Background(), &dto.ExportFilter{})
+	if err == nil {
+		t.Fatal("expected generator error")
 	}
 }
 

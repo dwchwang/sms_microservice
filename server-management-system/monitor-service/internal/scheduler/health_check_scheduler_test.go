@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/vcs-sms/monitor-service/internal/checker"
 	checkermocks "github.com/vcs-sms/monitor-service/internal/checker/mocks"
@@ -470,6 +471,115 @@ func TestScheduler_RunCycle_ESBulkFail(t *testing.T) {
 	scheduler.runCycle(context.Background())
 }
 
+func TestScheduler_RunCycle_ConfigLoadError(t *testing.T) {
+	serverReader := &repomocks.ServerReaderMock{
+		GetAllActiveServersFunc: func(ctx context.Context) ([]repository.ServerInfo, error) {
+			return []repository.ServerInfo{{ServerID: "SRV-001", ServerName: "S1", IPv4: "10.0.0.1"}}, nil
+		},
+	}
+	configRepo := &repomocks.HealthCheckConfigRepoMock{
+		GetAllEnabledFunc: func(ctx context.Context) ([]model.HealthCheckConfig, error) {
+			return nil, fmt.Errorf("config db unavailable")
+		},
+	}
+
+	pool := worker.NewPool(1, &checkermocks.HealthCheckerMock{}, zerolog.Nop())
+	scheduler := NewHealthCheckScheduler(
+		pool, serverReader, configRepo, &repomocks.ESStatusLogRepoMock{},
+		newMockRedis(), &kafkamocks.ProducerMock{}, zerolog.Nop(), 60*time.Second,
+	)
+
+	scheduler.runCycle(context.Background())
+}
+
+func TestScheduler_RunCycle_LockError(t *testing.T) {
+	serverReader := &repomocks.ServerReaderMock{
+		GetAllActiveServersFunc: func(ctx context.Context) ([]repository.ServerInfo, error) {
+			return []repository.ServerInfo{{ServerID: "SRV-001", ServerName: "S1", IPv4: "10.0.0.1"}}, nil
+		},
+	}
+	configRepo := &repomocks.HealthCheckConfigRepoMock{
+		GetAllEnabledFunc: func(ctx context.Context) ([]model.HealthCheckConfig, error) {
+			return []model.HealthCheckConfig{{ServerID: "SRV-001", TCPPort: 8080, TCPTimeoutMs: 10000, UptimeRate: 0.5}}, nil
+		},
+	}
+	redisMock := &MockRedisClient{
+		SetNXFunc: func(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error) {
+			return false, fmt.Errorf("redis unavailable")
+		},
+	}
+
+	pool := worker.NewPool(1, &checkermocks.HealthCheckerMock{}, zerolog.Nop())
+	scheduler := NewHealthCheckScheduler(
+		pool, serverReader, configRepo, &repomocks.ESStatusLogRepoMock{},
+		redisMock, &kafkamocks.ProducerMock{}, zerolog.Nop(), 60*time.Second,
+	)
+
+	scheduler.runCycle(context.Background())
+}
+
+func TestScheduler_RunCycle_ContextCancelledBeforeExecute(t *testing.T) {
+	serverReader := &repomocks.ServerReaderMock{
+		GetAllActiveServersFunc: func(ctx context.Context) ([]repository.ServerInfo, error) {
+			return []repository.ServerInfo{{ServerID: "SRV-001", ServerName: "S1", IPv4: "10.0.0.1"}}, nil
+		},
+	}
+	configRepo := &repomocks.HealthCheckConfigRepoMock{
+		GetAllEnabledFunc: func(ctx context.Context) ([]model.HealthCheckConfig, error) { return nil, nil },
+	}
+	checkerMock := &checkermocks.HealthCheckerMock{
+		CheckFunc: func(ctx context.Context, server *checker.ServerInfo) *checker.HealthResult {
+			return &checker.HealthResult{ServerID: server.ServerID, Status: "on", CheckedAt: time.Now().UTC()}
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	pool := worker.NewPool(1, checkerMock, zerolog.Nop())
+	scheduler := NewHealthCheckScheduler(
+		pool, serverReader, configRepo, &repomocks.ESStatusLogRepoMock{},
+		nil, &kafkamocks.ProducerMock{}, zerolog.Nop(), 60*time.Second,
+	)
+
+	scheduler.runCycle(ctx)
+}
+
+func TestScheduler_RunCycle_BatchAndKafkaErrors(t *testing.T) {
+	serverReader := &repomocks.ServerReaderMock{
+		GetAllActiveServersFunc: func(ctx context.Context) ([]repository.ServerInfo, error) {
+			return []repository.ServerInfo{{ServerID: "SRV-001", ServerName: "S1", IPv4: "10.0.0.1", Status: "off"}}, nil
+		},
+		BatchUpdateStatusFunc: func(ctx context.Context, changes []repository.StatusChangeEvent) error {
+			return fmt.Errorf("batch update failed")
+		},
+	}
+	configRepo := &repomocks.HealthCheckConfigRepoMock{
+		GetAllEnabledFunc: func(ctx context.Context) ([]model.HealthCheckConfig, error) { return nil, nil },
+	}
+	esRepo := &repomocks.ESStatusLogRepoMock{
+		BulkIndexFunc: func(ctx context.Context, results []*checker.HealthResult) error { return nil },
+	}
+	checkerMock := &checkermocks.HealthCheckerMock{
+		CheckFunc: func(ctx context.Context, server *checker.ServerInfo) *checker.HealthResult {
+			return &checker.HealthResult{ServerID: server.ServerID, Status: "on", CheckMethod: "tcp", CheckedAt: time.Now().UTC()}
+		},
+	}
+	producer := &kafkamocks.ProducerMock{
+		PublishFunc: func(ctx context.Context, topic string, key string, value interface{}) error {
+			return fmt.Errorf("kafka unavailable")
+		},
+	}
+
+	pool := worker.NewPool(1, checkerMock, zerolog.Nop())
+	scheduler := NewHealthCheckScheduler(
+		pool, serverReader, configRepo, esRepo, newMockRedis(), producer,
+		zerolog.Nop(), 60*time.Second,
+	)
+
+	scheduler.runCycle(context.Background())
+}
+
 func TestScheduler_CountByStatus(t *testing.T) {
 	results := []*checker.HealthResult{
 		{Status: "on"}, {Status: "on"}, {Status: "off"}, {Status: "on"},
@@ -487,6 +597,85 @@ func TestScheduler_CalculateLockTTLUsesEstimatedCycle(t *testing.T) {
 	ttl := calculateLockTTL(10000, 100, 5000, 60*time.Second)
 	if ttl < 530*time.Second {
 		t.Fatalf("expected ttl to cover estimated cycle, got %v", ttl)
+	}
+}
+
+func TestScheduler_CalculateLockTTLUsesMinimums(t *testing.T) {
+	ttl := calculateLockTTL(0, 0, 0, 10*time.Second)
+	if ttl != 40*time.Second {
+		t.Fatalf("expected interval minimum TTL, got %v", ttl)
+	}
+}
+
+func TestScheduler_RunCycleSafeRecoversPanic(t *testing.T) {
+	serverReader := &repomocks.ServerReaderMock{
+		GetAllActiveServersFunc: func(ctx context.Context) ([]repository.ServerInfo, error) {
+			panic("boom")
+		},
+	}
+	pool := worker.NewPool(1, &checkermocks.HealthCheckerMock{}, zerolog.Nop())
+	scheduler := NewHealthCheckScheduler(
+		pool, serverReader, &repomocks.HealthCheckConfigRepoMock{},
+		&repomocks.ESStatusLogRepoMock{}, nil, &kafkamocks.ProducerMock{},
+		zerolog.Nop(), 60*time.Second,
+	)
+
+	scheduler.runCycleSafe(context.Background())
+}
+
+func TestScheduler_StartStopsOnContextCancel(t *testing.T) {
+	serverReader := &repomocks.ServerReaderMock{
+		GetAllActiveServersFunc: func(ctx context.Context) ([]repository.ServerInfo, error) {
+			return nil, nil
+		},
+	}
+	configRepo := &repomocks.HealthCheckConfigRepoMock{
+		GetAllEnabledFunc: func(ctx context.Context) ([]model.HealthCheckConfig, error) {
+			return nil, nil
+		},
+	}
+	pool := worker.NewPool(1, &checkermocks.HealthCheckerMock{}, zerolog.Nop())
+	scheduler := NewHealthCheckScheduler(
+		pool, serverReader, configRepo, &repomocks.ESStatusLogRepoMock{},
+		newMockRedis(), &kafkamocks.ProducerMock{},
+		zerolog.Nop(), time.Hour,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		scheduler.Start(ctx)
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("scheduler did not stop after context cancellation")
+	}
+}
+
+func TestRealRedisClient_ErrorPaths(t *testing.T) {
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
+	defer rdb.Close()
+
+	client := NewRealRedisClient(rdb)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	if _, err := client.SetNX(ctx, "lock", "owner", time.Second); err == nil {
+		t.Fatal("expected SetNX error")
+	}
+	if err := client.ReleaseLock(ctx, "lock", "owner"); err == nil {
+		t.Fatal("expected ReleaseLock error")
+	}
+	if _, err := client.Get(ctx, "status"); err == nil {
+		t.Fatal("expected Get error")
+	}
+	if err := client.Set(ctx, "status", "on", time.Second); err == nil {
+		t.Fatal("expected Set error")
 	}
 }
 

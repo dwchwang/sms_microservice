@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { format, subDays } from "date-fns";
-import { Mail, BarChart3 } from "lucide-react";
+import { Mail, BarChart3, RefreshCw } from "lucide-react";
 import { useReportSummary } from "@/lib/api/hooks";
 import { Can } from "@/components/common/can";
 import { PageHeader } from "@/components/common/page-header";
@@ -33,8 +33,13 @@ export default function ReportsPage() {
   const [applied, setApplied] = useState({ start: WEEK_AGO, end: TODAY });
   const [sendOpen, setSendOpen] = useState(false);
 
-  const { data, isLoading, isError, error } = useReportSummary(applied.start, applied.end, true);
+  const { data, isLoading, isFetching, isError, error, refetch, dataUpdatedAt } = useReportSummary(
+    applied.start,
+    applied.end,
+    true,
+  );
   const lowUptime = data?.low_uptime_servers ?? [];
+  const lastUpdated = dataUpdatedAt ? format(new Date(dataUpdatedAt), "HH:mm:ss") : null;
 
   return (
     <div>
@@ -42,11 +47,22 @@ export default function ReportsPage() {
         title="Báo cáo uptime"
         description="Thống kê trạng thái & uptime server theo khoảng thời gian."
         actions={
-          <Can scope="report:send">
-            <Button onClick={() => setSendOpen(true)}>
-              <Mail /> Gửi qua email
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              aria-label="Làm mới dữ liệu báo cáo"
+            >
+              <RefreshCw className={isFetching ? "animate-spin" : undefined} />
+              Làm mới
             </Button>
-          </Can>
+            <Can scope="report:send">
+              <Button onClick={() => setSendOpen(true)}>
+                <Mail /> Gửi qua email
+              </Button>
+            </Can>
+          </div>
         }
       />
 
@@ -62,6 +78,9 @@ export default function ReportsPage() {
           <Button variant="secondary" onClick={() => setApplied({ start, end })}>
             <BarChart3 /> Xem báo cáo
           </Button>
+          {lastUpdated ? (
+            <p className="pb-2 text-xs text-mute">Cập nhật lần cuối: {lastUpdated}</p>
+          ) : null}
         </div>
       </Card>
 
@@ -99,7 +118,7 @@ export default function ReportsPage() {
           <div className="grid gap-4 lg:grid-cols-3">
             <Card>
               <CardHeader>
-                <CardTitle>Tỉ lệ On / Off</CardTitle>
+                <CardTitle>Tỉ lệ On / Off hiện tại</CardTitle>
               </CardHeader>
               <CardContent>
                 <OnOffDonut on={data.servers_on ?? 0} off={data.servers_off ?? 0} />

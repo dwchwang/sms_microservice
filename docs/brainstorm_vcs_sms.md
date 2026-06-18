@@ -775,8 +775,8 @@ CREATE INDEX idx_role_permissions_role_id ON auth_schema.role_permissions(role_i
 -- ============================
 INSERT INTO auth_schema.roles (id, name, description) VALUES
     ('a0000000-0000-0000-0000-000000000001', 'admin',    'Full access to all resources'),
-    ('a0000000-0000-0000-0000-000000000002', 'operator', 'Can read and update servers, view reports'),
-    ('a0000000-0000-0000-0000-000000000003', 'viewer',   'Read-only access');
+    ('a0000000-0000-0000-0000-000000000002', 'operator', 'Can operate servers, reports, and monitor status'),
+    ('a0000000-0000-0000-0000-000000000003', 'viewer',   'Read-only access with export permission');
 
 -- Admin scopes (full)
 INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
@@ -786,19 +786,26 @@ INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
     ('a0000000-0000-0000-0000-000000000001', 'server:delete'),
     ('a0000000-0000-0000-0000-000000000001', 'server:import'),
     ('a0000000-0000-0000-0000-000000000001', 'server:export'),
+    ('a0000000-0000-0000-0000-000000000001', 'monitor:view'),
     ('a0000000-0000-0000-0000-000000000001', 'report:view'),
     ('a0000000-0000-0000-0000-000000000001', 'report:send'),
     ('a0000000-0000-0000-0000-000000000001', 'user:manage');
 
 -- Operator scopes
 INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
+    ('a0000000-0000-0000-0000-000000000002', 'server:create'),
     ('a0000000-0000-0000-0000-000000000002', 'server:read'),
     ('a0000000-0000-0000-0000-000000000002', 'server:update'),
-    ('a0000000-0000-0000-0000-000000000002', 'report:view');
+    ('a0000000-0000-0000-0000-000000000002', 'server:import'),
+    ('a0000000-0000-0000-0000-000000000002', 'server:export'),
+    ('a0000000-0000-0000-0000-000000000002', 'monitor:view'),
+    ('a0000000-0000-0000-0000-000000000002', 'report:view'),
+    ('a0000000-0000-0000-0000-000000000002', 'report:send');
 
 -- Viewer scopes
 INSERT INTO auth_schema.role_permissions (role_id, scope) VALUES
     ('a0000000-0000-0000-0000-000000000003', 'server:read'),
+    ('a0000000-0000-0000-0000-000000000003', 'server:export'),
     ('a0000000-0000-0000-0000-000000000003', 'report:view');
 ```
 
@@ -1511,9 +1518,9 @@ sequenceDiagram
 
     Report->>ES: Aggregation Query<br/>(server-status-logs, yesterday 00:00 → 23:59)
     
-    Note over ES: Tính toán:<br/>- per_server uptime_rate<br/>- avg_uptime<br/>- status_counts (on/off)
+    Note over ES: Tính toán:<br/>- per_server uptime_pct<br/>- avg_uptime_pct<br/>- status_counts (on/off)
     
-    ES-->>Report: Aggregation results<br/>{avg_uptime: 97.85,<br/>on_count: 9523, off_count: 477,<br/>low_uptime_servers: [...]}
+    ES-->>Report: Aggregation results<br/>{avg_uptime_pct: 97.85,<br/>servers_on: 9523, servers_off: 477,<br/>low_uptime_servers: [...]}
     
     Report->>PG: SELECT COUNT(*) FROM server_schema.servers<br/>WHERE deleted_at IS NULL
     PG-->>Report: total_servers = 10000
@@ -1899,6 +1906,7 @@ Kết quả: Swagger UI tại `http://localhost:8080/swagger/index.html`
     "server:delete",
     "server:import",
     "server:export",
+    "monitor:view",
     "report:view",
     "report:send",
     "user:manage"
@@ -1913,14 +1921,15 @@ Kết quả: Swagger UI tại `http://localhost:8080/swagger/index.html`
 
 | Scope | Admin | Operator | Viewer |
 |-------|:-----:|:--------:|:------:|
-| `server:create` | ✅ | ❌ | ❌ |
+| `server:create` | ✅ | ✅ | ❌ |
 | `server:read` | ✅ | ✅ | ✅ |
 | `server:update` | ✅ | ✅ | ❌ |
 | `server:delete` | ✅ | ❌ | ❌ |
-| `server:import` | ✅ | ❌ | ❌ |
-| `server:export` | ✅ | ❌ | ❌ |
+| `server:import` | ✅ | ✅ | ❌ |
+| `server:export` | ✅ | ✅ | ✅ |
+| `monitor:view` | ✅ | ✅ | ❌ |
 | `report:view` | ✅ | ✅ | ✅ |
-| `report:send` | ✅ | ❌ | ❌ |
+| `report:send` | ✅ | ✅ | ❌ |
 | `user:manage` | ✅ | ❌ | ❌ |
 
 ---

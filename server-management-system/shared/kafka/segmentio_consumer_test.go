@@ -11,10 +11,13 @@ import (
 )
 
 type fakeMessageReader struct {
-	messages []segmentio.Message
-	mu       sync.Mutex
-	commits  int
-	onCommit func()
+	messages  []segmentio.Message
+	mu        sync.Mutex
+	commits   int
+	onCommit  func()
+	commitErr error
+	closeErr  error
+	closed    bool
 }
 
 func (r *fakeMessageReader) FetchMessage(ctx context.Context) (segmentio.Message, error) {
@@ -31,6 +34,9 @@ func (r *fakeMessageReader) FetchMessage(ctx context.Context) (segmentio.Message
 }
 
 func (r *fakeMessageReader) CommitMessages(ctx context.Context, msgs ...segmentio.Message) error {
+	if r.commitErr != nil {
+		return r.commitErr
+	}
 	r.mu.Lock()
 	r.commits += len(msgs)
 	r.mu.Unlock()
@@ -40,7 +46,10 @@ func (r *fakeMessageReader) CommitMessages(ctx context.Context, msgs ...segmenti
 	return nil
 }
 
-func (r *fakeMessageReader) Close() error { return nil }
+func (r *fakeMessageReader) Close() error {
+	r.closed = true
+	return r.closeErr
+}
 
 func (r *fakeMessageReader) commitCount() int {
 	r.mu.Lock()
@@ -112,5 +121,83 @@ func TestSegmentioConsumer_CommitsMalformedJSON(t *testing.T) {
 
 	if got := reader.commitCount(); got != 1 {
 		t.Fatalf("expected malformed JSON to be committed once, got %d", got)
+	}
+}
+
+func TestSegmentioConsumer_CommitsWhenNoHandlerRegistered(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reader := &fakeMessageReader{
+		messages: []segmentio.Message{{
+			Value: []byte(`{"event_id":"evt-1","event_type":"unknown","timestamp":"2026-06-11T00:00:00Z","source":"test","data":{}}`),
+		}},
+		onCommit: cancel,
+	}
+	consumer := NewSegmentioConsumer(DefaultSegmentioConsumerConfig([]string{"localhost:9092"}, "test-group"), zerolog.Nop())
+	consumer.handlerBackoff = 0
+
+	consumer.consumeLoop(ctx, "unknown", reader)
+
+	if got := reader.commitCount(); got != 1 {
+		t.Fatalf("expected commit without handler, got %d", got)
+	}
+}
+
+func TestSegmentioConsumer_CommitErrorDoesNotPanic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reader := &fakeMessageReader{
+		messages: []segmentio.Message{{
+			Value: []byte(`{"event_id":"evt-1","event_type":"server.created","timestamp":"2026-06-11T00:00:00Z","source":"test","data":{}}`),
+		}},
+		commitErr: fmt.Errorf("commit failed"),
+		onCommit:  cancel,
+	}
+	consumer := NewSegmentioConsumer(DefaultSegmentioConsumerConfig([]string{"localhost:9092"}, "test-group"), zerolog.Nop())
+	consumer.handlerBackoff = 0
+	consumer.handlers["server.created"] = func(ctx context.Context, event *Event) error {
+		cancel()
+		return nil
+	}
+
+	consumer.consumeLoop(ctx, "server.created", reader)
+}
+
+func TestSegmentioConsumer_SubscribeStartAndCloseStates(t *testing.T) {
+	consumer := NewSegmentioConsumer(DefaultSegmentioConsumerConfig([]string{"localhost:9092"}, "test-group"), zerolog.Nop())
+	if err := consumer.Subscribe("server.created", "group-1", func(ctx context.Context, event *Event) error { return nil }); err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+
+	reader := &fakeMessageReader{}
+	consumer.readers["server.created"] = reader
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := consumer.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if err := consumer.Start(context.Background()); err == nil {
+		t.Fatal("expected already started error")
+	}
+	if err := consumer.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if !reader.closed {
+		t.Fatal("expected reader to be closed")
+	}
+	if err := consumer.Subscribe("other", "group-1", func(ctx context.Context, event *Event) error { return nil }); err == nil {
+		t.Fatal("expected subscribe error after close")
+	}
+}
+
+func TestSegmentioConsumer_StartAfterClose(t *testing.T) {
+	consumer := NewSegmentioConsumer(DefaultSegmentioConsumerConfig([]string{"localhost:9092"}, "test-group"), zerolog.Nop())
+	if err := consumer.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	if err := consumer.Start(context.Background()); err == nil {
+		t.Fatal("expected start error after close")
 	}
 }

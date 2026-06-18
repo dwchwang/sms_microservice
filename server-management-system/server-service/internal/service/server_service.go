@@ -28,15 +28,51 @@ type ServerService interface {
 // serverServiceImpl implements ServerService.
 type serverServiceImpl struct {
 	repo     repository.ServerRepository
-	redis    *redis.Client
+	cache    serverCache
 	producer kafka.Producer
+}
+
+type serverCache interface {
+	Get(ctx context.Context, key string) (string, error)
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error
+	Del(ctx context.Context, keys ...string) error
+	ScanKeys(ctx context.Context, pattern string, count int64) ([]string, error)
+}
+
+type redisServerCache struct {
+	client *redis.Client
+}
+
+func (r *redisServerCache) Get(ctx context.Context, key string) (string, error) {
+	return r.client.Get(ctx, key).Result()
+}
+
+func (r *redisServerCache) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+	return r.client.Set(ctx, key, value, expiration).Err()
+}
+
+func (r *redisServerCache) Del(ctx context.Context, keys ...string) error {
+	return r.client.Del(ctx, keys...).Err()
+}
+
+func (r *redisServerCache) ScanKeys(ctx context.Context, pattern string, count int64) ([]string, error) {
+	iter := r.client.Scan(ctx, 0, pattern, count).Iterator()
+	var keys []string
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	return keys, iter.Err()
 }
 
 // NewServerService creates a new ServerService instance.
 func NewServerService(repo repository.ServerRepository, rdb *redis.Client, prod kafka.Producer) ServerService {
+	var cache serverCache
+	if rdb != nil {
+		cache = &redisServerCache{client: rdb}
+	}
 	return &serverServiceImpl{
 		repo:     repo,
-		redis:    rdb,
+		cache:    cache,
 		producer: prod,
 	}
 }
@@ -95,8 +131,8 @@ func (s *serverServiceImpl) CreateServer(ctx context.Context, req *dto.CreateSer
 func (s *serverServiceImpl) GetServer(ctx context.Context, serverID string) (*dto.ServerResponse, error) {
 	// 1. Check Redis cache
 	cacheKey := fmt.Sprintf("server:detail:%s", serverID)
-	if s.redis != nil {
-		cached, err := s.redis.Get(ctx, cacheKey).Result()
+	if s.cache != nil {
+		cached, err := s.cache.Get(ctx, cacheKey)
 		if err == nil {
 			var resp dto.ServerResponse
 			if err := json.Unmarshal([]byte(cached), &resp); err == nil {
@@ -116,9 +152,9 @@ func (s *serverServiceImpl) GetServer(ctx context.Context, serverID string) (*dt
 
 	// 3. Cache result
 	resp := mapServerToResponse(server)
-	if s.redis != nil {
+	if s.cache != nil {
 		data, _ := json.Marshal(resp)
-		s.redis.Set(ctx, cacheKey, data, 5*time.Minute)
+		_ = s.cache.Set(ctx, cacheKey, data, 5*time.Minute)
 	}
 
 	return resp, nil
@@ -130,8 +166,8 @@ func (s *serverServiceImpl) ListServers(ctx context.Context, filter *dto.ServerF
 	cacheKey := buildListCacheKey(filter)
 
 	// 2. Check Redis cache
-	if s.redis != nil {
-		cached, err := s.redis.Get(ctx, cacheKey).Result()
+	if s.cache != nil {
+		cached, err := s.cache.Get(ctx, cacheKey)
 		if err == nil {
 			var resp dto.ListServerResponse
 			if err := json.Unmarshal([]byte(cached), &resp); err == nil {
@@ -174,9 +210,9 @@ func (s *serverServiceImpl) ListServers(ctx context.Context, filter *dto.ServerF
 	}
 
 	// 5. Cache result
-	if s.redis != nil {
+	if s.cache != nil {
 		data, _ := json.Marshal(resp)
-		s.redis.Set(ctx, cacheKey, data, 2*time.Minute)
+		_ = s.cache.Set(ctx, cacheKey, data, 2*time.Minute)
 	}
 
 	return resp, nil
@@ -267,15 +303,18 @@ func (s *serverServiceImpl) DeleteServer(ctx context.Context, serverID string) e
 
 // invalidateCache removes related Redis cache entries.
 func (s *serverServiceImpl) invalidateCache(ctx context.Context, serverID string) {
-	if s.redis == nil {
+	if s.cache == nil {
 		return
 	}
-	s.redis.Del(ctx, fmt.Sprintf("server:detail:%s", serverID))
+	_ = s.cache.Del(ctx, fmt.Sprintf("server:detail:%s", serverID))
 
 	// Delete all list caches (SCAN pattern)
-	iter := s.redis.Scan(ctx, 0, "servers:list:*", 100).Iterator()
-	for iter.Next(ctx) {
-		s.redis.Del(ctx, iter.Val())
+	keys, err := s.cache.ScanKeys(ctx, "servers:list:*", 100)
+	if err != nil {
+		return
+	}
+	for _, key := range keys {
+		_ = s.cache.Del(ctx, key)
 	}
 }
 
@@ -314,8 +353,8 @@ func mapServerToResponse(s *model.Server) *dto.ServerResponse {
 
 // buildListCacheKey creates a deterministic cache key from filter parameters.
 func buildListCacheKey(f *dto.ServerFilter) string {
-	data := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%d",
-		f.Status, f.ServerName, f.IPv4, f.OS, f.Location,
+	data := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%d|%d",
+		f.Status, f.ServerID, f.ServerName, f.IPv4, f.OS, f.Location,
 		f.SortBy, f.SortOrder, f.Page, f.PageSize,
 	)
 	return fmt.Sprintf("servers:list:%x", sha256.Sum256([]byte(data)))

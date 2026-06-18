@@ -102,7 +102,7 @@ curl -X POST http://localhost:8080/api/v1/auth/login \
 
 ### 2.1. Đăng ký (Register)
 
-> ⚠️ **Lưu ý:** Người dùng mới đăng ký sẽ tự động được gán role `viewer` (chỉ xem).
+> ⚠️ **Lưu ý:** Người dùng mới đăng ký sẽ tự động được gán role `viewer` (xem server/báo cáo và export danh sách server).
 > Để được nâng cấp lên `operator` hoặc `admin`, cần có admin thực hiện (xem section 2.6).
 
 ```bash
@@ -245,7 +245,7 @@ curl "http://localhost:8080/api/v1/servers?status=on&os=Ubuntu&sort_by=server_na
   -H "Authorization: Bearer $TOKEN"
 
 # Tìm kiếm theo tên hoặc IP
-curl "http://localhost:8080/api/v1/servers?search=web" \
+curl "http://localhost:8080/api/v1/servers?server_name=web" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -327,9 +327,8 @@ curl -X POST http://localhost:8080/api/v1/servers/import \
   "data": {
     "job_id": "uuid...",
     "status": "pending",
-    "total_rows": 0,
-    "success_count": 0,
-    "failed_count": 0
+    "file_name": "servers.xlsx",
+    "message": "File đã được nhận, đang xử lý bất đồng bộ"
   }
 }
 ```
@@ -353,9 +352,10 @@ curl http://localhost:8080/api/v1/servers/import/<job_id> \
     "failed_count": 5,
     "success_list": [ ... ],
     "failed_list": [
-      {"row": 5, "server_id": "SRV-001", "error_reason": "Duplicate server_id"},
-      {"row": 12, "server_id": "", "error_reason": "server_id is required"}
-    ]
+      {"row_number": 5, "server_id": "SRV-001", "status": "failed", "reason": "Duplicate server_id"},
+      {"row_number": 12, "server_id": "", "status": "failed", "reason": "server_id is required"}
+    ],
+    "created_at": "2026-06-12T10:00:00Z"
   }
 }
 ```
@@ -443,9 +443,12 @@ curl "http://localhost:8080/api/v1/reports/summary?start_date=2026-06-01&end_dat
     "start_date": "2026-06-01",
     "end_date": "2026-06-12",
     "total_servers": 10000,
-    "avg_uptime": 95.7,
-    "top_low_uptime_servers": [
-      {"server_id": "SRV-05231", "server_name": "db-231", "uptime_rate": 45.2}
+    "servers_on": 9523,
+    "servers_off": 477,
+    "avg_uptime_pct": 95.7,
+    "total_checks": 120000,
+    "low_uptime_servers": [
+      {"server_id": "SRV-05231", "server_name": "db-231", "uptime_pct": 45.2, "total_checks": 12, "on_checks": 5}
     ]
   }
 }
@@ -471,7 +474,17 @@ curl -X POST http://localhost:8080/api/v1/reports \
 {
   "status": "success",
   "message": "Report sent successfully",
-  "data": {"job_id": "uuid...", "status": "completed"}
+  "data": {
+    "report_id": "uuid...",
+    "status": "completed",
+    "message": "Report sent successfully",
+    "summary": {
+      "total_servers": 10000,
+      "servers_on": 9523,
+      "servers_off": 477,
+      "avg_uptime_pct": 95.7
+    }
+  }
 }
 ```
 
@@ -498,7 +511,7 @@ Mở trình duyệt: **http://localhost:8080/swagger/index.html**
 3. Nhấn **Authorize** → **Close**
 4. Chọn endpoint muốn test → **Try it out** → **Execute**
 
-Tất cả 17 endpoints đều có thể test trực tiếp từ Swagger UI.
+Tất cả 18 endpoints đều có thể test trực tiếp từ Swagger UI.
 
 ---
 

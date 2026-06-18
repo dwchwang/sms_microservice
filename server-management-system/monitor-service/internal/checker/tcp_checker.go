@@ -10,19 +10,28 @@ import (
 // TCPChecker implements HealthChecker using real TCP connect.
 // It dials the server's IPv4:TCPPort and measures response time.
 type TCPChecker struct {
-	Timeout time.Duration
+	Timeout  time.Duration
+	DialHost string
 }
 
 // NewTCPChecker creates a new TCP health checker.
-func NewTCPChecker(timeout time.Duration) *TCPChecker {
-	return &TCPChecker{Timeout: timeout}
+func NewTCPChecker(timeout time.Duration, dialHost ...string) *TCPChecker {
+	checker := &TCPChecker{Timeout: timeout}
+	if len(dialHost) > 0 {
+		checker.DialHost = dialHost[0]
+	}
+	return checker
 }
 
 // Check performs a TCP health-check on the given server.
 // Uses context-aware dialing so cancellation properly aborts in-flight connections.
 func (c *TCPChecker) Check(ctx context.Context, server *ServerInfo) *HealthResult {
 	start := time.Now()
-	addr := fmt.Sprintf("%s:%d", server.IPv4, server.TCPPort)
+	host := server.IPv4
+	if c.DialHost != "" {
+		host = c.DialHost
+	}
+	addr := fmt.Sprintf("%s:%d", host, server.TCPPort)
 
 	result := &HealthResult{
 		ServerID:    server.ServerID,

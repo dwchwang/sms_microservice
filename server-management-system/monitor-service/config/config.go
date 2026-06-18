@@ -74,6 +74,7 @@ type KafkaConfig struct {
 type MonitorConfig struct {
 	CheckInterval  int     // seconds between health-check cycles (default: 60)
 	TCPTimeout     int     // milliseconds for TCP connect timeout (default: 5000)
+	TCPDialHost    string  // optional host override for simulator routing in Docker
 	WorkerCount    int     // number of concurrent workers (default: 100)
 	DefaultTCPPort int     // default TCP port if not in config (default: 80)
 	DefaultUptime  float64 // default uptime rate (default: 0.95)
@@ -157,6 +158,7 @@ func LoadConfig() *Config {
 	// Monitor
 	viper.SetDefault("MONITOR_CHECK_INTERVAL", 60)
 	viper.SetDefault("MONITOR_TCP_TIMEOUT", 5000)
+	viper.SetDefault("MONITOR_TCP_DIAL_HOST", "")
 	viper.SetDefault("MONITOR_WORKER_COUNT", 100)
 	viper.SetDefault("MONITOR_DEFAULT_TCP_PORT", 80)
 	viper.SetDefault("MONITOR_DEFAULT_UPTIME", 0.95)
@@ -211,6 +213,7 @@ func LoadConfig() *Config {
 		Monitor: MonitorConfig{
 			CheckInterval:  viper.GetInt("MONITOR_CHECK_INTERVAL"),
 			TCPTimeout:     viper.GetInt("MONITOR_TCP_TIMEOUT"),
+			TCPDialHost:    viper.GetString("MONITOR_TCP_DIAL_HOST"),
 			WorkerCount:    viper.GetInt("MONITOR_WORKER_COUNT"),
 			DefaultTCPPort: viper.GetInt("MONITOR_DEFAULT_TCP_PORT"),
 			DefaultUptime:  viper.GetFloat64("MONITOR_DEFAULT_UPTIME"),

@@ -60,6 +60,9 @@ func (r *serverRepository) FindAll(ctx context.Context, filter *dto.ServerFilter
 	if filter.Status != "" {
 		query = query.Where("status = ?", filter.Status)
 	}
+	if filter.ServerID != "" {
+		query = query.Where("server_id ILIKE ?", "%"+filter.ServerID+"%")
+	}
 	if filter.ServerName != "" {
 		query = query.Where("server_name ILIKE ?", "%"+filter.ServerName+"%")
 	}
@@ -83,7 +86,7 @@ func (r *serverRepository) FindAll(ctx context.Context, filter *dto.ServerFilter
 	sortOrder := "DESC"
 	allowedSortFields := map[string]bool{
 		"server_id": true, "server_name": true, "status": true,
-		"ipv4": true, "created_at": true, "updated_at": true,
+		"ipv4": true, "location": true, "created_at": true, "updated_at": true,
 	}
 	if filter.SortBy != "" && allowedSortFields[filter.SortBy] {
 		sortBy = filter.SortBy

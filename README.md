@@ -22,7 +22,7 @@ Hệ thống quản lý tập trung **10.000 server** theo kiến trúc Microser
 | 📊 **Báo cáo** | Uptime report + Email HTML (Gmail SMTP) + Daily Cron | 1.0 |
 | 🔐 **Auth & RBAC** | JWT HS256, 3 roles (Admin/Operator/Viewer), 10 scopes | 0.5 |
 | 🛡️ **Bảo mật** | Chống SQL Injection (GORM), Rate Limiting (Redis), bcrypt | 0.5 |
-| 📋 **OpenAPI** | Swagger UI đầy đủ 17 endpoints | 0.5 |
+| 📋 **OpenAPI** | Swagger UI đầy đủ 18 endpoints | 0.5 |
 | 🧪 **Unit Test** | Test coverage ≥ 90% core business packages | 0.5 |
 | 📝 **Logging** | Structured JSON logs + logrotate (lumberjack) | 0.5 |
 | 🚀 **Deploy** | Docker Compose 1 lệnh → 11 containers | — |
@@ -108,7 +108,7 @@ open http://localhost:8080/swagger/index.html
 
 ---
 
-## 📡 API Endpoints (19)
+## 📡 API Endpoints (18)
 
 | Method | Path | Scope | Mô tả |
 |--------|------|-------|-------|
@@ -121,11 +121,11 @@ open http://localhost:8080/swagger/index.html
 | PUT | `/api/v1/auth/users/{user_id}/role` | `user:manage` | Đổi role người dùng |
 | POST | `/api/v1/servers` | `server:create` | Tạo server |
 | GET | `/api/v1/servers` | `server:read` | Danh sách server |
-| GET | `/api/v1/servers/:id` | `server:read` | Chi tiết server |
-| PUT | `/api/v1/servers/:id` | `server:update` | Cập nhật server |
-| DELETE | `/api/v1/servers/:id` | `server:delete` | Xóa server |
+| GET | `/api/v1/servers/{server_id}` | `server:read` | Chi tiết server |
+| PUT | `/api/v1/servers/{server_id}` | `server:update` | Cập nhật server |
+| DELETE | `/api/v1/servers/{server_id}` | `server:delete` | Xóa server |
 | POST | `/api/v1/servers/import` | `server:import` | Import Excel |
-| GET | `/api/v1/servers/import/:job_id` | `server:import` | Trạng thái import |
+| GET | `/api/v1/servers/import/{job_id}` | `server:import` | Trạng thái import |
 | POST | `/api/v1/servers/export` | `server:export` | Export Excel |
 | GET | `/api/v1/monitor/status` | `monitor:view` | Monitor service status |
 | GET | `/api/v1/reports/summary` | `report:view` | Uptime summary |
@@ -179,7 +179,7 @@ make coverage
 |----------|-------|
 | [System Design](docs/architecture.md) | Kiến trúc tổng quan, database, caching, security, deployment |
 | [User Guide](docs/user-guide.md) | Hướng dẫn sử dụng chi tiết kèm curl examples |
-| [API Specification](docs/api-spec.yaml) | OpenAPI 3.0.3 — 17 endpoints |
+| [API Specification](docs/api-spec.yaml) | OpenAPI 3.0.3 — 18 endpoints |
 | [Database Strategy](docs/02-database-strategy.md) | 5 schemas, cross-schema access |
 | [Event-Driven Kafka](docs/03-event-driven-kafka.md) | 7 topics, async flows |
 | [Worker Pool Design](docs/04-high-concurrency-worker-pool.md) | 100 goroutines, TCP health check |

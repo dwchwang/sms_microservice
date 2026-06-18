@@ -38,8 +38,9 @@ Nhưng trong Code, ta **KHÔNG NÊN** hardcode kiểm tra `if user.Role == "admi
 
 **Giải pháp: Role -> Scopes mapping**
 Trong DB có bảng `role_permissions`.
-- Role `admin` -> có các scope: `server:create`, `server:read`, `server:update`, `server:delete`, `report:view`, v.v.
-- Role `viewer` -> có các scope: `server:read`, `report:view`.
+- Role `admin` -> có các scope: `server:create`, `server:read`, `server:update`, `server:delete`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send`, `user:manage`.
+- Role `operator` -> có các scope vận hành: `server:create`, `server:read`, `server:update`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send`.
+- Role `viewer` -> có các scope: `server:read`, `server:export`, `report:view`.
 
 Khi `auth-service` cấp JWT, nó query DB lấy toàn bộ list scopes của role đó, nén vào trong JWT (ví dụ mảng `["server:read", "report:view"]`).
 

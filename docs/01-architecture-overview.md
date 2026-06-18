@@ -34,4 +34,4 @@ Hệ thống của chúng ta sử dụng một API Gateway đứng trước 5 mi
 3. **Chống Spam (Rate Limiting)**: Sử dụng Redis để giới hạn (ví dụ 100 requests/phút/IP), chặn đứng các cuộc tấn công DDoS ở ngay vòng gửi xe, bảo vệ các backend services.
 4. **Log tập trung**: Sinh ra một `request_id` duy nhất và ghi log thời gian response cho toàn bộ hệ thống.
 
-**Tóm lại:** API Gateway giúp các microservice backend trở nên cực kỳ "ngu" và "nhẹ" — chúng không màng tới JWT, không lo rate limit, chỉ tập trung xử lý đúng logic nghiệp vụ của chúng (ví dụ: tạo server, tính toán uptime).
+**Tóm lại:** API Gateway giúp các microservice backend nhẹ hơn: phần kiểm tra JWT, rate limit và scope được xử lý tập trung ở gateway, còn các service phía sau tập trung vào nghiệp vụ như tạo server, tính toán uptime, import/export và gửi báo cáo.

@@ -43,7 +43,7 @@ Hệ thống quản lý tập trung **10.000 server** cho công ty VCS, bao gồ
                     ┌───────▼────────┐
                     │  API GATEWAY   │  Gin Framework
                     │  Port: 8080    │  • JWT Validation
-                    │                │  • Scope RBAC (9 scopes)
+                    │                │  • Scope RBAC (10 scopes)
                     │                │  • Rate Limiting (Redis)
                     │                │  • Reverse Proxy
                     └───┬───┬───┬───┬┘
@@ -172,7 +172,7 @@ PostgreSQL 17 (vcs_sms)
 
 ## 4. API Design
 
-### 4.1. Tổng hợp Endpoints (17 endpoints)
+### 4.1. Tổng hợp Endpoints (18 endpoints)
 
 | # | Method | Path | Service | Scope |
 |---|--------|------|---------|-------|
@@ -181,18 +181,19 @@ PostgreSQL 17 (vcs_sms)
 | 3 | POST | `/api/v1/auth/refresh` | Auth | Public |
 | 4 | POST | `/api/v1/auth/logout` | Auth | Authenticated |
 | 5 | GET | `/api/v1/auth/profile` | Auth | Authenticated |
-| 6 | POST | `/api/v1/servers` | Server | `server:create` |
-| 7 | GET | `/api/v1/servers` | Server | `server:read` |
-| 8 | GET | `/api/v1/servers/:server_id` | Server | `server:read` |
-| 9 | PUT | `/api/v1/servers/:server_id` | Server | `server:update` |
-| 10 | DELETE | `/api/v1/servers/:server_id` | Server | `server:delete` |
-| 11 | POST | `/api/v1/servers/import` | FileIO | `server:import` |
-| 12 | GET | `/api/v1/servers/import/:job_id` | FileIO | `server:import` |
-| 13 | POST | `/api/v1/servers/export` | FileIO | `server:export` |
-| 14 | GET | `/api/v1/monitor/health` | Monitor | Authenticated |
-| 15 | GET | `/api/v1/monitor/servers/:server_id/status` | Monitor | Authenticated |
-| 16 | GET | `/api/v1/reports/summary` | Report | `report:view` |
-| 17 | POST | `/api/v1/reports` | Report | `report:send` |
+| 6 | GET | `/api/v1/auth/users` | Auth | `user:manage` |
+| 7 | PUT | `/api/v1/auth/users/{user_id}/role` | Auth | `user:manage` |
+| 8 | POST | `/api/v1/servers` | Server | `server:create` |
+| 9 | GET | `/api/v1/servers` | Server | `server:read` |
+| 10 | GET | `/api/v1/servers/{server_id}` | Server | `server:read` |
+| 11 | PUT | `/api/v1/servers/{server_id}` | Server | `server:update` |
+| 12 | DELETE | `/api/v1/servers/{server_id}` | Server | `server:delete` |
+| 13 | POST | `/api/v1/servers/import` | FileIO | `server:import` |
+| 14 | GET | `/api/v1/servers/import/{job_id}` | FileIO | `server:import` |
+| 15 | POST | `/api/v1/servers/export` | FileIO | `server:export` |
+| 16 | GET | `/api/v1/monitor/status` | Monitor | `monitor:view` |
+| 17 | GET | `/api/v1/reports/summary` | Report | `report:view` |
+| 18 | POST | `/api/v1/reports` | Report | `report:send` |
 
 ### 4.2. Authentication Flow
 
@@ -354,9 +355,9 @@ Uptime Aggregation (Report Service):
 
 | Role | Scopes |
 |------|--------|
-| **Admin** | `server:create`, `server:read`, `server:update`, `server:delete`, `server:import`, `server:export`, `report:view`, `report:send`, `user:manage` |
-| **Operator** | `server:create`, `server:read`, `server:update`, `server:import`, `server:export`, `report:view`, `report:send` |
-| **Viewer** | `server:read`, `report:view` |
+| **Admin** | `server:create`, `server:read`, `server:update`, `server:delete`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send`, `user:manage` |
+| **Operator** | `server:create`, `server:read`, `server:update`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send` |
+| **Viewer** | `server:read`, `server:export`, `report:view` |
 
 ### 8.3. Defenses
 

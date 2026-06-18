@@ -26,7 +26,7 @@ type HealthChecker interface {
 type ServerInfo struct {
 	ServerID   string
 	ServerName string
-	IPv4       string  // = "tcp-simulator" (Docker DNS)
+	IPv4       string  // Inventory IP shown to users/reports.
 	TCPPort    int     // 9001..19000
 	UptimeRate float64 // stored for reference, not used by TCPChecker
 }

@@ -390,6 +390,38 @@ func TestInitiateImport_FileTooLarge(t *testing.T) {
 	}
 }
 
+func TestInitiateImport_HeaderValidationError(t *testing.T) {
+	file, header := createTestMultipartFile(t, "servers.xlsx", []byte("xlsx bytes"))
+	defer file.Close()
+
+	createCalled := false
+	jobRepo := &mocks.ImportJobRepoMock{
+		CreateFunc: func(ctx context.Context, job *model.ImportJob) error {
+			createCalled = true
+			return nil
+		},
+	}
+	parser := &fakeExcelParser{
+		validateHeadersFunc: func(filePath string) error {
+			return fmt.Errorf("bad headers")
+		},
+	}
+	producer := &fakeProducer{}
+
+	svc := NewImportService(jobRepo, &mocks.ServerWriterMock{}, parser, producer, nil, setupTestConfig(), zerolog.New(nil))
+
+	_, err := svc.InitiateImport(context.Background(), file, header, "user-123")
+	if err == nil {
+		t.Fatal("expected header validation error")
+	}
+	if createCalled {
+		t.Fatal("job should not be created after header validation fails")
+	}
+	if len(producer.publishedEvents) != 0 {
+		t.Fatalf("expected no Kafka events, got %#v", producer.publishedEvents)
+	}
+}
+
 func TestProcessImportJob_AllSuccess(t *testing.T) {
 	headers := []string{"server_id", "server_name", "ipv4", "os", "cpu_cores", "ram_gb", "disk_gb", "location", "description"}
 	tmpFile := createTestXLSX(t, headers, [][]string{

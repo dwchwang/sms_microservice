@@ -1,8 +1,11 @@
 package jwt
 
 import (
+	"fmt"
 	"testing"
 	"time"
+
+	jwtlib "github.com/golang-jwt/jwt/v5"
 )
 
 func TestGenerateAccessToken_Success(t *testing.T) {
@@ -150,6 +153,34 @@ func TestGenerateAccessToken_NilScopes(t *testing.T) {
 	}
 	if token == "" || jti == "" {
 		t.Fatal("expected non-empty token and jti")
+	}
+}
+
+func TestGenerateAccessToken_SignError(t *testing.T) {
+	original := signToken
+	signToken = func(token *jwtlib.Token, secret string) (string, error) {
+		return "", fmt.Errorf("sign failed")
+	}
+	t.Cleanup(func() { signToken = original })
+
+	cfg := TokenConfig{Secret: "test-secret", AccessTokenDuration: 15 * time.Minute, RefreshTokenDuration: 7 * 24 * time.Hour}
+	_, _, err := GenerateAccessToken(cfg, "user-1", "test", "viewer", nil)
+	if err == nil {
+		t.Fatal("expected sign error")
+	}
+}
+
+func TestGenerateRefreshToken_SignError(t *testing.T) {
+	original := signToken
+	signToken = func(token *jwtlib.Token, secret string) (string, error) {
+		return "", fmt.Errorf("sign failed")
+	}
+	t.Cleanup(func() { signToken = original })
+
+	cfg := TokenConfig{Secret: "test-secret", AccessTokenDuration: 15 * time.Minute, RefreshTokenDuration: 7 * 24 * time.Hour}
+	_, _, err := GenerateRefreshToken(cfg, "user-1")
+	if err == nil {
+		t.Fatal("expected sign error")
 	}
 }
 

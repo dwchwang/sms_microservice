@@ -133,6 +133,22 @@ func TestRegisterHandler_ConflictError(t *testing.T) {
 	}
 }
 
+func TestRegisterHandler_DuplicateEmailConflict(t *testing.T) {
+	mock := &mockAuthService{registerErr: service.ErrDuplicateEmail}
+	handler := NewAuthHandler(mock, "test-secret")
+	router := setupTestRouter(handler)
+
+	body := `{"username":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
+	req, _ := http.NewRequest("POST", "/api/v1/auth/register", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d", w.Code)
+	}
+}
+
 // ── Login Tests ──
 
 func TestLoginHandler_ValidCredentials(t *testing.T) {
@@ -187,6 +203,34 @@ func TestLoginHandler_InvalidCredentials(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestLoginHandler_InactiveAndTooManyAttempts(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{name: "inactive", err: service.ErrInactiveAccount, code: http.StatusForbidden},
+		{name: "too many", err: service.ErrTooManyAttempts, code: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockAuthService{loginErr: tt.err}
+			handler := NewAuthHandler(mock, "test-secret")
+			router := setupTestRouter(handler)
+
+			body := `{"username":"admin","password":"password123"}`
+			req, _ := http.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != tt.code {
+				t.Errorf("expected %d, got %d", tt.code, w.Code)
+			}
+		})
 	}
 }
 
@@ -417,6 +461,40 @@ func TestListUsersHandler_Success(t *testing.T) {
 	}
 }
 
+func TestListUsersHandler_NormalizesPagination(t *testing.T) {
+	mock := &mockAuthService{
+		listUsersResult: &dto.UserListResponse{Total: 0, Page: 1, PageSize: 20, TotalPages: 0},
+	}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("GET", "/api/v1/auth/users?page=-5&page_size=500", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListUsersHandler_ServiceError(t *testing.T) {
+	mock := &mockAuthService{listUsersErr: context.DeadlineExceeded}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("GET", "/api/v1/auth/users", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", w.Code)
+	}
+}
+
 func TestListUsersHandler_NoToken(t *testing.T) {
 	mock := &mockAuthService{}
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
@@ -485,6 +563,24 @@ func TestUpdateUserRoleHandler_MissingUserManageScope(t *testing.T) {
 	}
 }
 
+func TestUpdateUserRoleHandler_InvalidCurrentUserID(t *testing.T) {
+	targetID := uuid.New()
+	mock := &mockAuthService{}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("not-a-uuid", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"admin"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
 func TestUpdateUserRoleHandler_CannotChangeOwnRole(t *testing.T) {
 	targetID := uuid.New()
 	mock := &mockAuthService{updateRoleErr: service.ErrCannotChangeOwnRole}
@@ -517,5 +613,41 @@ func TestUpdateUserRoleHandler_InvalidUserID(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdateUserRoleHandler_InvalidBody(t *testing.T) {
+	targetID := uuid.New()
+	mock := &mockAuthService{}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422, got %d", w.Code)
+	}
+}
+
+func TestUpdateUserRoleHandler_RoleNotFound(t *testing.T) {
+	targetID := uuid.New()
+	mock := &mockAuthService{updateRoleErr: service.ErrRoleNotFound}
+	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
+	router := setupTestRouter(handler)
+
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"viewer"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
 	}
 }

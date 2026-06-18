@@ -24,6 +24,10 @@ type TokenConfig struct {
 	RefreshTokenDuration time.Duration
 }
 
+var signToken = func(token *jwtlib.Token, secret string) (string, error) {
+	return token.SignedString([]byte(secret))
+}
+
 // DefaultTokenConfig returns sensible defaults for token durations.
 func DefaultTokenConfig(secret string) TokenConfig {
 	return TokenConfig{
@@ -51,7 +55,7 @@ func GenerateAccessToken(cfg TokenConfig, userID, username, role string, scopes 
 	}
 
 	token := jwtlib.NewWithClaims(jwtlib.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(cfg.Secret))
+	tokenString, err := signToken(token, cfg.Secret)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to sign access token: %w", err)
 	}
@@ -74,7 +78,7 @@ func GenerateRefreshToken(cfg TokenConfig, userID string) (string, string, error
 	}
 
 	token := jwtlib.NewWithClaims(jwtlib.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(cfg.Secret))
+	tokenString, err := signToken(token, cfg.Secret)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to sign refresh token: %w", err)
 	}

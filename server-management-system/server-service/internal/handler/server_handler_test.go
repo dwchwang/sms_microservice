@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/vcs-sms/server-service/internal/dto"
+	"github.com/vcs-sms/server-service/internal/service"
 )
 
 // mockServerService implements service.ServerService for testing.
@@ -96,6 +97,77 @@ func TestCreateServerHandler_InvalidBody(t *testing.T) {
 	}
 }
 
+func TestCreateServerHandler_Conflict(t *testing.T) {
+	mock := &mockServerService{createErr: service.ErrDuplicateServerID}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	body := `{"server_id":"SRV-001","server_name":"test-server","ipv4":"10.0.0.1"}`
+	req, _ := http.NewRequest("POST", "/api/v1/servers", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetServerHandler_Success(t *testing.T) {
+	mock := &mockServerService{
+		getResult: &dto.ServerResponse{
+			ServerID:   "SRV-001",
+			ServerName: "test-server",
+			Status:     "off",
+			IPv4:       "10.0.0.1",
+		},
+	}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("GET", "/api/v1/servers/SRV-001", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetServerHandler_NotFound(t *testing.T) {
+	mock := &mockServerService{getErr: service.ErrServerNotFound}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("GET", "/api/v1/servers/SRV-404", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetServerHandler_MissingID(t *testing.T) {
+	mock := &mockServerService{}
+	handler := NewServerHandler(mock)
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/missing", handler.GetServer)
+
+	req, _ := http.NewRequest("GET", "/missing", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestListServersHandler_DefaultPagination(t *testing.T) {
 	mock := &mockServerService{
 		listResult: &dto.ListServerResponse{
@@ -125,6 +197,36 @@ func TestListServersHandler_DefaultPagination(t *testing.T) {
 	}
 }
 
+func TestListServersHandler_InvalidQuery(t *testing.T) {
+	mock := &mockServerService{}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("GET", "/api/v1/servers?page=abc", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListServersHandler_ServiceError(t *testing.T) {
+	mock := &mockServerService{listErr: assertErr{}}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("GET", "/api/v1/servers", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestUpdateServerHandler_ValidBody(t *testing.T) {
 	mock := &mockServerService{
 		updateResult: &dto.ServerResponse{
@@ -149,6 +251,54 @@ func TestUpdateServerHandler_ValidBody(t *testing.T) {
 	}
 }
 
+func TestUpdateServerHandler_InvalidBody(t *testing.T) {
+	mock := &mockServerService{}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("PUT", "/api/v1/servers/SRV-001", bytes.NewBufferString(`{"ipv4":"not-an-ip"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateServerHandler_NotFound(t *testing.T) {
+	mock := &mockServerService{updateErr: service.ErrServerNotFound}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("PUT", "/api/v1/servers/SRV-001", bytes.NewBufferString(`{"server_name":"updated-server"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateServerHandler_Conflict(t *testing.T) {
+	mock := &mockServerService{updateErr: service.ErrDuplicateServerName}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("PUT", "/api/v1/servers/SRV-001", bytes.NewBufferString(`{"server_name":"taken"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestDeleteServerHandler_Success(t *testing.T) {
 	mock := &mockServerService{}
 	handler := NewServerHandler(mock)
@@ -161,6 +311,21 @@ func TestDeleteServerHandler_Success(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDeleteServerHandler_NotFound(t *testing.T) {
+	mock := &mockServerService{deleteErr: service.ErrServerNotFound}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	req, _ := http.NewRequest("DELETE", "/api/v1/servers/SRV-404", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -178,4 +343,27 @@ func TestDeleteServerHandler_MissingID(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
 	}
+}
+
+func TestDeleteServerHandler_MissingIDDirect(t *testing.T) {
+	mock := &mockServerService{}
+	handler := NewServerHandler(mock)
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.DELETE("/missing", handler.DeleteServer)
+
+	req, _ := http.NewRequest("DELETE", "/missing", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+type assertErr struct{}
+
+func (assertErr) Error() string {
+	return "service failed"
 }

@@ -101,7 +101,8 @@ func main() {
 
 	// 8. Init checker (TCP only — no factory needed)
 	healthChecker := checker.NewTCPChecker(
-		time.Duration(cfg.Monitor.TCPTimeout) * time.Millisecond,
+		time.Duration(cfg.Monitor.TCPTimeout)*time.Millisecond,
+		cfg.Monitor.TCPDialHost,
 	)
 
 	// 9. Init worker pool

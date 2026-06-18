@@ -5,9 +5,9 @@ Hệ thống VCS-SMS sử dụng **Apache Kafka (phiên bản 3.9 KRaft)** làm 
 ## 1. Tại sao cần Message Broker (Kafka) thay vì gọi HTTP API?
 
 Hãy tưởng tượng luồng Import Excel:
-Người dùng upload 1 file Excel chứa 5000 servers. `fileio-service` đọc file. Sau đó nó phải báo cho `server-service` để lưu 5000 dòng này vào Postgres.
-- Nếu dùng HTTP API: `fileio-service` gửi request, `server-service` mất 10 giây để chèn DB. Kết nối HTTP bị treo 10 giây, người dùng ngồi nhìn màn hình loading xoay tròn, rủi ro timeout rất cao.
-- **Dùng Kafka (Event-Driven)**: `fileio-service` chỉ việc bắn một tin nhắn (Event) "Có 5000 server cần import" vào Kafka (mất vài mili-giây) rồi phản hồi ngay cho người dùng: "Hệ thống đang xử lý, vui lòng kiểm tra lại sau". Sau đó, `server-service` từ từ lấy tin nhắn đó từ Kafka ra để xử lý ngầm (Background job).
+Người dùng upload 1 file Excel chứa 5000 servers. Nếu request HTTP phải parse, validate và ghi hết 5000 dòng trước khi trả response, người dùng sẽ phải chờ lâu và rủi ro timeout rất cao.
+- Nếu xử lý đồng bộ: `fileio-service` giữ kết nối HTTP cho đến khi đọc file và insert xong toàn bộ dữ liệu. Khi file lớn hoặc DB chậm, request dễ timeout.
+- **Dùng Kafka (Event-Driven)**: `fileio-service` chỉ lưu file, tạo `import_jobs`, bắn event `import.job.created` vào Kafka rồi phản hồi ngay `job_id`. Background consumer của chính `fileio-service` đọc event, parse Excel, ghi batch vào `server_schema.servers`, cập nhật tiến độ job và publish `server.created` cho từng server import thành công để `monitor-service` tạo cấu hình health-check tương ứng.
 
 **Lợi ích của Event-Driven:**
 1. **Decoupling (Giải phóng phụ thuộc)**: Service gửi (Producer) không cần biết Service nhận (Consumer) là ai, có đang sống hay không. Nếu `server-service` đang sập bảo trì, thông báo vẫn nằm an toàn trong Kafka. Khi `server-service` bật lên, nó sẽ đọc tiếp mà không mất dữ liệu.
@@ -33,9 +33,11 @@ Trong dự án này, chúng ta sử dụng Apache Kafka 3.9 ở chế độ KRaf
 
 ## 4. Các luồng sự kiện chính trong VCS-SMS
 
-1. **Luồng Cập nhật Server**: `server-service` CRUD DB xong -> Bắn event `server.created/updated/deleted`. `monitor-service` nghe để cập nhật lại danh sách mục tiêu cần ping.
-2. **Luồng Trạng thái (Status)**: `monitor-service` check thấy server sập -> Bắn event `server.status.changed`. Bất cứ service nào quan tâm (VD hệ thống Alert sau này) có thể nghe.
-3. **Luồng Batch Log**: Mỗi 1 phút có 10.000 kết quả ping. `monitor-service` gom lại thành 1 mảng lớn (Batch) -> Bắn event `server.health.batch`. `report-service` (hoặc logstash) nghe để đẩy vào Elasticsearch tối ưu hóa network.
+1. **Luồng Cập nhật Server**: `server-service` CRUD DB xong -> bắn event `server.created/updated/deleted`. `monitor-service` nghe `server.created` và `server.deleted` để tạo hoặc tắt cấu hình health-check.
+2. **Luồng Import Excel**: `fileio-service` tạo `import_jobs` -> bắn `import.job.created`. Consumer nền của `fileio-service` xử lý file, ghi DB, cập nhật `import_job_details` và bắn `server.created` cho các dòng thành công.
+3. **Luồng Trạng thái (Status)**: `monitor-service` phát hiện server đổi trạng thái -> bắn event `server.status.changed`. Bất cứ service nào quan tâm (VD hệ thống Alert sau này) có thể nghe.
+4. **Luồng Batch Summary**: Mỗi chu kỳ health-check, `monitor-service` ghi toàn bộ kết quả vào Elasticsearch bằng bulk index, cập nhật PostgreSQL cho các server đổi trạng thái, rồi bắn event `server.health.batch` chứa thống kê tổng hợp của chu kỳ.
+5. **Luồng Daily Report Trigger**: topic `report.daily.trigger` được tạo sẵn cho khả năng kích hoạt báo cáo định kỳ qua event; implementation hiện tại dùng cron nội bộ trong `report-service` để gửi email hằng ngày lúc 8:00.
 
 ## 5. Go Kafka Client: segmentio/kafka-go
 

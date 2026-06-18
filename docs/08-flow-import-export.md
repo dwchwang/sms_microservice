@@ -10,11 +10,12 @@ Hãy tưởng tượng bạn ra ngân hàng làm thủ tục, thay vì đứng c
 2. **Khởi tạo Job**: `fileio-service` lập tức tạo một bản ghi "Hồ sơ" trong bảng `import_jobs` với trạng thái là `PENDING` (Đang chờ xử lý). Nó sinh ra một mã `Job_ID` (ví dụ: JOB-999).
 3. **Phản hồi ngay lập tức**: Service trả ngay mã `JOB-999` về cho màn hình của người dùng. Màn hình người dùng tắt vòng xoay loading, hiện thanh tiến trình (Progress bar) và chuyển sang trạng thái chờ. Người dùng có thể đi thao tác màn hình khác.
 4. **Đẩy việc vào Kafka**: Cùng lúc đó, `fileio-service` ném một sự kiện `import.job.created` lên Kafka (gửi kèm file hoặc đường dẫn file).
-5. **Xử lý nền**: Một "Công nhân ngầm" (Background Worker) của chính `fileio-service` (hoặc `server-service`) rảnh rỗi sẽ nhặt sự kiện từ Kafka xuống. Nó bắt đầu mở file Excel, đọc từng dòng (parse), kiểm tra tính hợp lệ của IP, cấu hình.
-6. **Lưu trữ hàng loạt**: Nó gom dữ liệu thành từng lô (Batch), ví dụ 500 dòng 1 lần, rồi nhét thẳng (Insert) vào Database (bảng `servers`).
-7. **Cập nhật tiến độ**: Làm xong lô nào, công nhân cập nhật % tiến độ vào Database.
-8. **Hoàn tất**: Khi đọc hết file, công nhân đổi trạng thái Job thành `COMPLETED` (hoặc `FAILED` nếu file lỗi). 
-9. **Tracking**: Trong lúc hệ thống đang cật lực xử lý ngầm, giao diện Web của người dùng thỉnh thoảng (vài giây 1 lần) gửi mã `JOB-999` lên để hỏi tiến độ, từ đó làm đầy thanh Progress bar trên màn hình cho tới khi báo thành công 100%.
+5. **Xử lý nền**: Consumer nền của chính `fileio-service` nhặt event từ Kafka. Nó mở file Excel đã lưu trong `uploads/`, đọc từng dòng, validate `server_id`, `server_name`, IPv4 và các trường tài nguyên.
+6. **Lưu trữ hàng loạt**: `fileio-service` dùng quyền cross-schema INSERT để ghi các dòng hợp lệ vào `server_schema.servers`, đồng thời ghi kết quả từng dòng vào `fileio_schema.import_job_details`.
+7. **Publish server.created**: Với mỗi server import thành công, `fileio-service` bắn event `server.created`. `monitor-service` nghe event này để tạo cấu hình health-check cho server mới.
+8. **Cập nhật tiến độ**: Trong quá trình xử lý, service cập nhật `total_rows`, `success_count`, `failed_count`, `started_at`, `completed_at` và `error_message` vào bảng `import_jobs`.
+9. **Hoàn tất**: Khi đọc hết file, công nhân đổi trạng thái Job thành `COMPLETED` hoặc `FAILED`. Cache danh sách server trong Redis được invalidate bằng pattern `server:detail:*` và `servers:list:*`.
+10. **Tracking**: Trong lúc hệ thống xử lý ngầm, giao diện Web gọi `GET /api/v1/servers/import/{job_id}` để lấy tiến độ, danh sách dòng thành công và danh sách dòng lỗi.
 
 ## 2. Luồng Export Excel (Synchronous)
 

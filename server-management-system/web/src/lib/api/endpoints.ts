@@ -35,6 +35,7 @@ export const authApi = {
 // ── Servers ──
 export interface ServerListParams {
   status?: "on" | "off";
+  server_id?: string;
   server_name?: string;
   ipv4?: string;
   location?: string;

@@ -92,7 +92,7 @@ Công ty VCS hiện đang quản lý khoảng **10.000 server**. Dự án VCS-SM
                     ┌───────▼────────┐
                     │  API GATEWAY   │  Gin Framework
                     │  Port: 8080    │  • JWT Validation
-                    │                │  • Scope RBAC (9 scopes)
+                    │                │  • Scope RBAC (10 scopes)
                     │                │  • Rate Limiting (Redis)
                     │                │  • Reverse Proxy
                     └───┬───┬───┬───┬┘
@@ -261,7 +261,7 @@ PostgreSQL 17 (vcs_sms)
 #### Bảng `auth_schema.roles` & `role_permissions`
 
 - **roles**: 3 roles mặc định — `admin`, `operator`, `viewer`
-- **role_permissions**: Mapping role → scope (many-to-many), ví dụ `admin` → 9 scopes, `viewer` → 2 scopes
+- **role_permissions**: Mapping role → scope (many-to-many), ví dụ `admin` → 10 scopes, `viewer` → 3 scopes
 
 #### Bảng `fileio_schema.import_jobs` & `import_job_details`
 
@@ -356,9 +356,9 @@ Vì JWT là Stateless, khi user đăng xuất, hệ thống đưa `jti` vào Red
 
 | Role | Scopes |
 |------|--------|
-| **Admin** | `server:create`, `server:read`, `server:update`, `server:delete`, `server:import`, `server:export`, `report:view`, `report:send`, `user:manage` |
-| **Operator** | `server:create`, `server:read`, `server:update`, `server:import`, `server:export`, `report:view`, `report:send` |
-| **Viewer** | `server:read`, `report:view` |
+| **Admin** | `server:create`, `server:read`, `server:update`, `server:delete`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send`, `user:manage` |
+| **Operator** | `server:create`, `server:read`, `server:update`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send` |
+| **Viewer** | `server:read`, `server:export`, `report:view` |
 
 **Scope Validation tại API Gateway:**
 - Mỗi route khai báo cần scope gì (VD: `POST /api/v1/servers` → `server:create`)
@@ -387,7 +387,7 @@ Backend service chỉ đọc Header tĩnh để biết user hiện tại — pat
 
 ## 6. Thiết kế API
 
-### 6.1. Tổng hợp Endpoints (19 endpoints)
+### 6.1. Tổng hợp Endpoints (18 endpoints)
 
 | # | Method | Path | Service | Scope | Mô tả |
 |:-:|--------|------|---------|-------|-------|
@@ -397,14 +397,14 @@ Backend service chỉ đọc Header tĩnh để biết user hiện tại — pat
 | 4 | POST | `/api/v1/auth/logout` | Auth | Authenticated | Đăng xuất |
 | 5 | GET | `/api/v1/auth/profile` | Auth | Authenticated | Thông tin cá nhân |
 | 6 | GET | `/api/v1/auth/users` | Auth | `user:manage` | Danh sách người dùng |
-| 7 | PUT | `/api/v1/auth/users/{id}/role` | Auth | `user:manage` | Đổi role người dùng |
+| 7 | PUT | `/api/v1/auth/users/{user_id}/role` | Auth | `user:manage` | Đổi role người dùng |
 | 8 | POST | `/api/v1/servers` | Server | `server:create` | Tạo server |
 | 9 | GET | `/api/v1/servers` | Server | `server:read` | Danh sách server (filter, sort, paging) |
-| 10 | GET | `/api/v1/servers/:id` | Server | `server:read` | Chi tiết server |
-| 11 | PUT | `/api/v1/servers/:id` | Server | `server:update` | Cập nhật server |
-| 12 | DELETE | `/api/v1/servers/:id` | Server | `server:delete` | Xóa server (soft delete) |
+| 10 | GET | `/api/v1/servers/{server_id}` | Server | `server:read` | Chi tiết server |
+| 11 | PUT | `/api/v1/servers/{server_id}` | Server | `server:update` | Cập nhật server |
+| 12 | DELETE | `/api/v1/servers/{server_id}` | Server | `server:delete` | Xóa server (soft delete) |
 | 13 | POST | `/api/v1/servers/import` | FileIO | `server:import` | Import Excel |
-| 14 | GET | `/api/v1/servers/import/:job_id` | FileIO | `server:import` | Trạng thái import |
+| 14 | GET | `/api/v1/servers/import/{job_id}` | FileIO | `server:import` | Trạng thái import |
 | 15 | POST | `/api/v1/servers/export` | FileIO | `server:export` | Export Excel |
 | 16 | GET | `/api/v1/monitor/status` | Monitor | `monitor:view` | Monitor service status |
 | 17 | GET | `/api/v1/reports/summary` | Report | `report:view` | Uptime summary |
@@ -566,8 +566,9 @@ Trong kiến trúc Event-Driven, mọi thao tác thay đổi dữ liệu đều 
 #### Import Excel (Bất đồng bộ qua Kafka)
 1. Upload `.xlsx` → `fileio-service` tạo import_job (PENDING) → Trả `job_id` ngay lập tức
 2. Đẩy event `import.job.created` lên Kafka
-3. Background Worker parse Excel → Validate → Batch INSERT (500 dòng/lần)
-4. Cập nhật tiến độ → Client poll `GET /import/<job_id>` để check
+3. Consumer nền của `fileio-service` parse Excel → validate → ghi các dòng hợp lệ vào `server_schema.servers`
+4. Ghi kết quả từng dòng vào `import_job_details`, publish `server.created` cho các server thành công
+5. Cập nhật tiến độ → Client poll `GET /api/v1/servers/import/{job_id}` để check
 
 **Output**: Số lượng & danh sách server import thành công/thất bại + lý do lỗi.
 
@@ -937,8 +938,8 @@ Mở trình duyệt: **http://localhost:8080/swagger/index.html**
 | ✅ Báo cáo định kỳ (Daily Email) | Hoàn thành | Cron 8:00 AM + HTML template |
 | ✅ Báo cáo chủ động (On-Demand) | Hoàn thành | API + email delivery |
 | ✅ JWT Authentication | Hoàn thành | HS256 + Refresh Token + Blacklist |
-| ✅ RBAC (3 roles, 9 scopes) | Hoàn thành | Admin, Operator, Viewer |
-| ✅ OpenAPI / Swagger UI | Hoàn thành | 19 endpoints documented |
+| ✅ RBAC (3 roles, 10 scopes) | Hoàn thành | Admin, Operator, Viewer |
+| ✅ OpenAPI / Swagger UI | Hoàn thành | 18 endpoints documented |
 | ✅ Unit Test ≥ 90% | Hoàn thành | Core business packages (fileio, report, monitor) |
 | ✅ SQL Injection Protection | Hoàn thành | GORM parameterized queries |
 | ✅ Error Handling | Hoàn thành | 17 error codes + structured response |

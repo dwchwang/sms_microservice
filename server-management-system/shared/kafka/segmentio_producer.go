@@ -12,9 +12,14 @@ import (
 
 // SegmentioProducer is a Kafka producer backed by segmentio/kafka-go (Writer).
 type SegmentioProducer struct {
-	writer *kafka.Writer
+	writer messageWriter
 	logger zerolog.Logger
 	closed bool
+}
+
+type messageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafka.Message) error
+	Close() error
 }
 
 // SegmentioProducerConfig holds configuration for the segmentio producer.
