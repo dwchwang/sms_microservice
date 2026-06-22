@@ -154,8 +154,8 @@ VALUES (
 
 CREATE TABLE IF NOT EXISTS server_schema.servers (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    server_id       VARCHAR(100)  NOT NULL UNIQUE,
-    server_name     VARCHAR(255)  NOT NULL UNIQUE,
+    server_id       VARCHAR(100)  NOT NULL,
+    server_name     VARCHAR(255)  NOT NULL,
     status          VARCHAR(20)   NOT NULL DEFAULT 'off' CHECK (status IN ('on', 'off')),
     ipv4            VARCHAR(15)   NOT NULL,
     os              VARCHAR(100),
@@ -169,9 +169,10 @@ CREATE TABLE IF NOT EXISTS server_schema.servers (
     deleted_at      TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_servers_server_id
+-- Uniqueness applies only to non-deleted rows so a soft-deleted server can be re-imported.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_servers_server_id
     ON server_schema.servers(server_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_servers_server_name
+CREATE UNIQUE INDEX IF NOT EXISTS uq_servers_server_name
     ON server_schema.servers(server_name) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_servers_status
     ON server_schema.servers(status) WHERE deleted_at IS NULL;

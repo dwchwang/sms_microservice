@@ -51,7 +51,7 @@ BEGIN
             locations[1 + (i % 5)],
             'Auto-generated server #' || i
         )
-        ON CONFLICT (server_id) DO UPDATE SET
+        ON CONFLICT (server_id) WHERE deleted_at IS NULL DO UPDATE SET
             ipv4 = EXCLUDED.ipv4,
             location = EXCLUDED.location,
             updated_at = NOW();

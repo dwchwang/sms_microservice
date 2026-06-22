@@ -5,6 +5,7 @@ import (
 
 	"github.com/vcs-sms/monitor-service/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // HealthCheckConfigRepo defines the interface for health check config persistence.
@@ -25,8 +26,18 @@ func NewConfigRepo(db *gorm.DB) HealthCheckConfigRepo {
 	return &healthCheckConfigRepo{db: db}
 }
 
+// Create inserts a health-check config, or re-enables an existing one for the
+// same server_id (e.g. when a soft-deleted server is re-imported). On conflict
+// only is_enabled is restored so the previously seeded tcp_port / uptime_rate
+// are preserved and the server keeps mapping to its TCP simulator port.
 func (r *healthCheckConfigRepo) Create(ctx context.Context, config *model.HealthCheckConfig) error {
-	return r.db.WithContext(ctx).Create(config).Error
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "server_id"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"is_enabled": true,
+			"updated_at": gorm.Expr("NOW()"),
+		}),
+	}).Create(config).Error
 }
 
 func (r *healthCheckConfigRepo) GetByServerID(ctx context.Context, serverID string) (*model.HealthCheckConfig, error) {
