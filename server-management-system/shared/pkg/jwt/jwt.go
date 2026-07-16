@@ -11,7 +11,7 @@ import (
 // Claims represents custom JWT claims for the VCS-SMS system.
 type Claims struct {
 	UserID   string   `json:"user_id"`
-	Username string   `json:"username"`
+	Email string   `json:"Email"`
 	Role     string   `json:"role"`
 	Scopes   []string `json:"scopes"`
 	jwtlib.RegisteredClaims
@@ -38,13 +38,13 @@ func DefaultTokenConfig(secret string) TokenConfig {
 }
 
 // GenerateAccessToken creates a signed JWT access token.
-func GenerateAccessToken(cfg TokenConfig, userID, username, role string, scopes []string) (string, string, error) {
+func GenerateAccessToken(cfg TokenConfig, userID, Email, role string, scopes []string) (string, string, error) {
 	now := time.Now().UTC()
 	jti := uuid.New().String()
 
 	claims := &Claims{
 		UserID:   userID,
-		Username: username,
+		Email: Email,
 		Role:     role,
 		Scopes:   scopes,
 		RegisteredClaims: jwtlib.RegisteredClaims{

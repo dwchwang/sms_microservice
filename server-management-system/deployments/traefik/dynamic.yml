@@ -1,0 +1,69 @@
+http:
+  # ============================================
+  # Middlewares
+  # ============================================
+  middlewares:
+    # ForwardAuth -> Identity Service
+    forward-auth:
+      forwardAuth:
+        address: "http://auth-service:8081/internal/verify"
+        authResponseHeaders:
+          - "X-User-Id"
+          - "X-User-Scopes"
+          - "X-User-Email"
+        authResponseHeadersRegex: "^X-"
+
+    # Rate limit global
+    rate-limit-global:
+      rateLimit:
+        average: 100
+        burst: 200
+        period: "1s"
+
+    # Rate limit cho auth endpoints (chặt hơn)
+    rate-limit-auth:
+      rateLimit:
+        average: 10
+        burst: 20
+        period: "1s"
+
+  # ============================================
+  # Routers
+  # ============================================
+  routers:
+    server-api:
+      rule: "PathPrefix(`/api/v1/servers`)"
+      service: server-service
+      middlewares:
+        - forward-auth
+        - rate-limit-global
+
+    report-api:
+      rule: "PathPrefix(`/api/v1/reports`)"
+      service: report-service
+      middlewares:
+        - forward-auth
+        - rate-limit-global
+
+    auth-api:
+      rule: "PathPrefix(`/api/v1/auth`)"
+      service: auth-service
+      middlewares:
+        - rate-limit-auth
+
+  # ============================================
+  # Services
+  # ============================================
+  services:
+    server-service:
+      loadBalancer:
+        servers:
+          - url: "http://server-service:8082"
+    report-service:
+      loadBalancer:
+        servers:
+          - url: "http://report-service:8084"
+    auth-service:
+      loadBalancer:
+        servers:
+          - url: "http://auth-service:8081"

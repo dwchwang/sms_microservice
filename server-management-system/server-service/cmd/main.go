@@ -15,7 +15,6 @@ import (
 	"github.com/vcs-sms/server-service/internal/handler"
 	"github.com/vcs-sms/server-service/internal/repository"
 	"github.com/vcs-sms/server-service/internal/service"
-	"github.com/vcs-sms/shared/kafka"
 	"github.com/vcs-sms/shared/logger"
 	"github.com/vcs-sms/shared/middleware"
 )
@@ -40,12 +39,9 @@ func main() {
 	// 4. Connect Redis
 	rdb := database.ConnectRedis(cfg.Redis)
 
-	// 5. Init Kafka producer (dummy for now — real segmentio/kafka-go in Phase 2)
-	producer := kafka.NewDummyProducer(log)
-
-	// 6. Init layers
+	// 5. Init layers
 	serverRepo := repository.NewServerRepository(db)
-	serverSvc := service.NewServerService(serverRepo, rdb, producer)
+	serverSvc := service.NewServerService(serverRepo, rdb)
 	serverHandler := handler.NewServerHandler(serverSvc)
 
 	// 7. Setup Gin router

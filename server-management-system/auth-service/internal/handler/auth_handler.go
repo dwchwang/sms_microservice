@@ -13,11 +13,10 @@ import (
 	"github.com/vcs-sms/auth-service/internal/dto"
 	"github.com/vcs-sms/auth-service/internal/service"
 	apperrors "github.com/vcs-sms/shared/errors"
+	sharedauth "github.com/vcs-sms/shared/pkg/auth"
 	sharedjwt "github.com/vcs-sms/shared/pkg/jwt"
 	"github.com/vcs-sms/shared/response"
 )
-
-const userManageScope = "user:manage"
 
 // AuthHandler handles HTTP requests for authentication endpoints.
 type AuthHandler struct {
@@ -202,7 +201,7 @@ func (h *AuthHandler) GetProfile(c *gin.Context) {
 // @Failure 403 {object} response.ApiErrorResponse
 // @Router /api/v1/auth/users [get]
 func (h *AuthHandler) ListUsers(c *gin.Context) {
-	if _, ok := h.requireScope(c, userManageScope); !ok {
+	if _, ok := h.requireScope(c, sharedauth.ScopeUserList); !ok {
 		return
 	}
 
@@ -240,7 +239,7 @@ func (h *AuthHandler) ListUsers(c *gin.Context) {
 // @Failure 404 {object} response.ApiErrorResponse
 // @Router /api/v1/auth/users/{user_id}/role [put]
 func (h *AuthHandler) UpdateUserRole(c *gin.Context) {
-	claims, ok := h.requireScope(c, userManageScope)
+	claims, ok := h.requireScope(c, sharedauth.ScopeUserManageRole)
 	if !ok {
 		return
 	}
@@ -303,8 +302,6 @@ func handleAuthError(c *gin.Context, err error) {
 		response.Error(c, http.StatusUnauthorized, apperrors.ErrInvalidCredentials.Code, response.FieldError{
 			Field: "credentials", Code: "INVALID", Message: apperrors.ErrInvalidCredentials.Message,
 		})
-	case errors.Is(err, service.ErrDuplicateUsername):
-		response.Conflict(c, apperrors.ErrDuplicateUsername.Message)
 	case errors.Is(err, service.ErrDuplicateEmail):
 		response.Conflict(c, apperrors.ErrDuplicateEmail.Message)
 	case errors.Is(err, service.ErrUserNotFound) || errors.Is(err, service.ErrRoleNotFound):

@@ -64,6 +64,10 @@ func main() {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
+	// ForwardAuth endpoint
+	verifyHandler := handler.NewVerifyHandler(cfg.JWT.Secret)
+	r.GET("/internal/verify", verifyHandler.Verify)
+
 	// Auth routes
 	auth := r.Group("/api/v1/auth")
 	{

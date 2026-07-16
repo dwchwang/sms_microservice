@@ -30,15 +30,14 @@ type DatabaseConfig struct {
 	User     string
 	Password string
 	DBName   string
-	Schema   string
 	SSLMode  string
 }
 
 // DSN returns the PostgreSQL connection string.
 func (c DatabaseConfig) DSN() string {
 	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s search_path=%s",
-		c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode, c.Schema,
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode,
 	)
 }
 
@@ -95,13 +94,12 @@ func LoadConfig() *Config {
 	viper.SetDefault("APP_PORT", "8081")
 	viper.SetDefault("APP_ENV", "development")
 
-	viper.SetDefault("AUTH_DB_HOST", "localhost")
-	viper.SetDefault("AUTH_DB_PORT", "5432")
-	viper.SetDefault("AUTH_DB_USER", "auth_user")
-	viper.SetDefault("AUTH_DB_PASSWORD", "auth_pass_secret")
-	viper.SetDefault("AUTH_DB_NAME", "vcs_sms")
-	viper.SetDefault("AUTH_DB_SCHEMA", "auth_schema")
-	viper.SetDefault("AUTH_DB_SSLMODE", "disable")
+	viper.SetDefault("IDENTITY_DB_HOST", "localhost")
+	viper.SetDefault("IDENTITY_DB_PORT", "5432")
+	viper.SetDefault("IDENTITY_DB_USER", "identity_user")
+	viper.SetDefault("IDENTITY_DB_PASSWORD", "identity_pass_secret")
+	viper.SetDefault("IDENTITY_DB_NAME", "identity_db")
+	viper.SetDefault("IDENTITY_DB_SSLMODE", "disable")
 
 	viper.SetDefault("REDIS_HOST", "localhost")
 	viper.SetDefault("REDIS_PORT", "6379")
@@ -126,13 +124,12 @@ func LoadConfig() *Config {
 			Env:  viper.GetString("APP_ENV"),
 		},
 		Database: DatabaseConfig{
-			Host:     viper.GetString("AUTH_DB_HOST"),
-			Port:     viper.GetString("AUTH_DB_PORT"),
-			User:     viper.GetString("AUTH_DB_USER"),
-			Password: viper.GetString("AUTH_DB_PASSWORD"),
-			DBName:   viper.GetString("AUTH_DB_NAME"),
-			Schema:   viper.GetString("AUTH_DB_SCHEMA"),
-			SSLMode:  viper.GetString("AUTH_DB_SSLMODE"),
+			Host:     viper.GetString("IDENTITY_DB_HOST"),
+			Port:     viper.GetString("IDENTITY_DB_PORT"),
+			User:     viper.GetString("IDENTITY_DB_USER"),
+			Password: viper.GetString("IDENTITY_DB_PASSWORD"),
+			DBName:   viper.GetString("IDENTITY_DB_NAME"),
+			SSLMode:  viper.GetString("IDENTITY_DB_SSLMODE"),
 		},
 		Redis: RedisConfig{
 			Host:     viper.GetString("REDIS_HOST"),

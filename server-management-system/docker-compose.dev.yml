@@ -11,14 +11,7 @@ services:
     extends:
       file: docker-compose.yml
       service: elasticsearch
-  kafka:
-    extends:
-      file: docker-compose.yml
-      service: kafka
-  kafka-init:
-    extends:
-      file: docker-compose.yml
-      service: kafka-init
+
   tcp-simulator:
     extends:
       file: docker-compose.yml

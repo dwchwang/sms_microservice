@@ -34,8 +34,8 @@ func TestGenerateAccessToken_Success(t *testing.T) {
 	if claims.UserID != "user-123" {
 		t.Errorf("expected UserID 'user-123', got '%s'", claims.UserID)
 	}
-	if claims.Username != "testuser" {
-		t.Errorf("expected Username 'testuser', got '%s'", claims.Username)
+	if claims.Email != "testuser" {
+		t.Errorf("expected Email 'testuser', got '%s'", claims.Email)
 	}
 	if claims.Role != "admin" {
 		t.Errorf("expected Role 'admin', got '%s'", claims.Role)
@@ -127,8 +127,8 @@ func TestExtractClaims_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractClaims failed: %v", err)
 	}
-	if claims.Username != "alice" {
-		t.Errorf("expected Username 'alice', got '%s'", claims.Username)
+	if claims.Email != "alice" {
+		t.Errorf("expected Email 'alice', got '%s'", claims.Email)
 	}
 }
 
@@ -228,7 +228,7 @@ func TestExtractClaims_ExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractClaims failed: %v", err)
 	}
-	if claims.Username != "expired" {
-		t.Errorf("expected 'expired', got '%s'", claims.Username)
+	if claims.Email != "expired" {
+		t.Errorf("expected 'expired', got '%s'", claims.Email)
 	}
 }

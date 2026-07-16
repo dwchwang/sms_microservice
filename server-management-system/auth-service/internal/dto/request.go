@@ -4,7 +4,6 @@ package dto
 // New users are always assigned the "viewer" role (least privilege).
 // Role can be upgraded by an admin via PUT /auth/users/{user_id}/role.
 type RegisterRequest struct {
-	Username string `json:"username" binding:"required,min=3,max=100"`
 	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required,min=8"`
 	FullName string `json:"full_name" binding:"required"`
@@ -17,7 +16,7 @@ type UpdateUserRoleRequest struct {
 
 // LoginRequest is the request body for user login.
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
+	Email string `json:"email" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
 

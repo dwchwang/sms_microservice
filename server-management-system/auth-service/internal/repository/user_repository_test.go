@@ -32,12 +32,12 @@ func TestUserRepository_Create(t *testing.T) {
 	userID := uuid.New()
 	roleID := uuid.New()
 
-	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "auth_schema"."users"`)).
-		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "users"`)).
+		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(userID))
 
 	user := &model.User{
-		ID: userID, Username: "test", Email: "test@test.com",
+		ID: userID, Email: "test@test.com",
 		PasswordHash: "hash", FullName: "Test", RoleID: roleID, IsActive: true,
 	}
 	err := repo.Create(context.Background(), user)
@@ -49,60 +49,26 @@ func TestUserRepository_Create(t *testing.T) {
 	}
 }
 
-func TestUserRepository_FindByUsername(t *testing.T) {
-	db, mock := setupAuthTestDB(t)
-	repo := NewUserRepository(db)
-
-	rows := sqlmock.NewRows([]string{"id", "username", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
-		AddRow(uuid.New(), "testuser", "test@test.com", "hash", "Test", uuid.New(), true, nil, nil)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users" WHERE username = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
-		WithArgs("testuser", 1).
-		WillReturnRows(rows)
-
-	user, err := repo.FindByUsername(context.Background(), "testuser")
-	if err != nil {
-		t.Fatalf("FindByUsername failed: %v", err)
-	}
-	if user.Username != "testuser" {
-		t.Errorf("expected 'testuser', got '%s'", user.Username)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("unfulfilled expectations: %v", err)
-	}
-}
-
-func TestUserRepository_FindByUsername_NotFound(t *testing.T) {
-	db, mock := setupAuthTestDB(t)
-	repo := NewUserRepository(db)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users"`)).
-		WithArgs("nonexistent", 1).
-		WillReturnError(gorm.ErrRecordNotFound)
-
-	_, err := repo.FindByUsername(context.Background(), "nonexistent")
-	if err != gorm.ErrRecordNotFound {
-		t.Errorf("expected ErrRecordNotFound, got %v", err)
-	}
-}
-
 func TestUserRepository_FindByEmail(t *testing.T) {
 	db, mock := setupAuthTestDB(t)
 	repo := NewUserRepository(db)
 
-	rows := sqlmock.NewRows([]string{"id", "username", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
-		AddRow(uuid.New(), "testuser", "test@test.com", "hash", "Test", uuid.New(), true, nil, nil)
+	rows := sqlmock.NewRows([]string{"id", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
+		AddRow(uuid.New(), "test@test.com", "hash", "Test", uuid.New(), true, nil, nil)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users" WHERE email = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
-		WithArgs("test@test.com", 1).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE email = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
+		WithArgs("testuser", 1).
 		WillReturnRows(rows)
 
-	user, err := repo.FindByEmail(context.Background(), "test@test.com")
+	user, err := repo.FindByEmail(context.Background(), "testuser")
 	if err != nil {
 		t.Fatalf("FindByEmail failed: %v", err)
 	}
 	if user.Email != "test@test.com" {
 		t.Errorf("expected 'test@test.com', got '%s'", user.Email)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unfulfilled expectations: %v", err)
 	}
 }
 
@@ -110,25 +76,27 @@ func TestUserRepository_FindByEmail_NotFound(t *testing.T) {
 	db, mock := setupAuthTestDB(t)
 	repo := NewUserRepository(db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users"`)).
-		WithArgs("missing@test.com", 1).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users"`)).
+		WithArgs("nonexistent", 1).
 		WillReturnError(gorm.ErrRecordNotFound)
 
-	_, err := repo.FindByEmail(context.Background(), "missing@test.com")
+	_, err := repo.FindByEmail(context.Background(), "nonexistent")
 	if err != gorm.ErrRecordNotFound {
 		t.Errorf("expected ErrRecordNotFound, got %v", err)
 	}
 }
+
+
 
 func TestUserRepository_FindByID(t *testing.T) {
 	db, mock := setupAuthTestDB(t)
 	repo := NewUserRepository(db)
 
 	id := uuid.New()
-	rows := sqlmock.NewRows([]string{"id", "username", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
-		AddRow(id, "testuser", "test@test.com", "hash", "Test", uuid.New(), true, nil, nil)
+	rows := sqlmock.NewRows([]string{"id", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
+		AddRow(id, "test@test.com", "hash", "Test", uuid.New(), true, nil, nil)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users" WHERE id = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE id = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
 		WithArgs(id, 1).
 		WillReturnRows(rows)
 
@@ -146,7 +114,7 @@ func TestUserRepository_FindByID_NotFound(t *testing.T) {
 	repo := NewUserRepository(db)
 
 	id := uuid.New()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users"`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users"`)).
 		WithArgs(id, 1).
 		WillReturnError(gorm.ErrRecordNotFound)
 
@@ -164,20 +132,20 @@ func TestUserRepository_FindByIDWithRole(t *testing.T) {
 	roleID := uuid.New()
 	permID := uuid.New()
 
-	userRows := sqlmock.NewRows([]string{"id", "username", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
-		AddRow(userID, "testuser", "test@test.com", "hash", "Test", roleID, true, nil, nil)
+	userRows := sqlmock.NewRows([]string{"id", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
+		AddRow(userID, "test@test.com", "hash", "Test", roleID, true, nil, nil)
 	roleRows := sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
 		AddRow(roleID, "admin", "Admin role", nil, nil)
 	permRows := sqlmock.NewRows([]string{"id", "role_id", "scope", "created_at"}).
 		AddRow(permID, roleID, "server:read", nil)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users" WHERE id = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE id = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
 		WithArgs(userID, 1).
 		WillReturnRows(userRows)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."roles" WHERE "roles"."id" = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "roles" WHERE "roles"."id" = $1`)).
 		WithArgs(roleID).
 		WillReturnRows(roleRows)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."role_permissions" WHERE "role_permissions"."role_id" = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "role_permissions" WHERE "role_permissions"."role_id" = $1`)).
 		WithArgs(roleID).
 		WillReturnRows(permRows)
 
@@ -198,7 +166,7 @@ func TestUserRepository_FindByIDWithRole_NotFound(t *testing.T) {
 	repo := NewUserRepository(db)
 
 	id := uuid.New()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users"`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users"`)).
 		WithArgs(id, 1).
 		WillReturnError(gorm.ErrRecordNotFound)
 
@@ -216,20 +184,20 @@ func TestUserRepository_FindByIDFull(t *testing.T) {
 	roleID := uuid.New()
 	permID := uuid.New()
 
-	userRows := sqlmock.NewRows([]string{"id", "username", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
-		AddRow(userID, "fulluser", "full@test.com", "hash", "Full User", roleID, true, nil, nil)
+	userRows := sqlmock.NewRows([]string{"id", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
+		AddRow(userID, "full@test.com", "hash", "Full User", roleID, true, nil, nil)
 	roleRows := sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
 		AddRow(roleID, "admin", "Admin role", nil, nil)
 	permRows := sqlmock.NewRows([]string{"id", "role_id", "scope", "created_at"}).
 		AddRow(permID, roleID, "user:manage", nil)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users" WHERE id = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE id = $1 AND "users"."deleted_at" IS NULL ORDER BY "users"."id" LIMIT $2`)).
 		WithArgs(userID, 1).
 		WillReturnRows(userRows)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."roles" WHERE "roles"."id" = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "roles" WHERE "roles"."id" = $1`)).
 		WithArgs(roleID).
 		WillReturnRows(roleRows)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."role_permissions" WHERE "role_permissions"."role_id" = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "role_permissions" WHERE "role_permissions"."role_id" = $1`)).
 		WithArgs(roleID).
 		WillReturnRows(permRows)
 
@@ -253,23 +221,23 @@ func TestUserRepository_FindAllUsers(t *testing.T) {
 	roleID := uuid.New()
 	permID := uuid.New()
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "auth_schema"."users" WHERE "users"."deleted_at" IS NULL`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "users" WHERE "users"."deleted_at" IS NULL`)).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
-	userRows := sqlmock.NewRows([]string{"id", "username", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
-		AddRow(userID, "listuser", "list@test.com", "hash", "List User", roleID, true, nil, nil)
+	userRows := sqlmock.NewRows([]string{"id", "email", "password_hash", "full_name", "role_id", "is_active", "created_at", "updated_at"}).
+		AddRow(userID, "list@test.com", "hash", "List User", roleID, true, nil, nil)
 	roleRows := sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
 		AddRow(roleID, "viewer", "Viewer role", nil, nil)
 	permRows := sqlmock.NewRows([]string{"id", "role_id", "scope", "created_at"}).
 		AddRow(permID, roleID, "server:read", nil)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."users" WHERE "users"."deleted_at" IS NULL ORDER BY created_at DESC LIMIT $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "users" WHERE "users"."deleted_at" IS NULL ORDER BY created_at DESC LIMIT $1`)).
 		WithArgs(20).
 		WillReturnRows(userRows)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."roles" WHERE "roles"."id" = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "roles" WHERE "roles"."id" = $1`)).
 		WithArgs(roleID).
 		WillReturnRows(roleRows)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."role_permissions" WHERE "role_permissions"."role_id" = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "role_permissions" WHERE "role_permissions"."role_id" = $1`)).
 		WithArgs(roleID).
 		WillReturnRows(permRows)
 
@@ -294,7 +262,7 @@ func TestUserRepository_UpdateLastLogin(t *testing.T) {
 
 	id := uuid.New()
 
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "auth_schema"."users" SET "last_login_at"=$1,"updated_at"=$2 WHERE id = $3 AND "users"."deleted_at" IS NULL`)).
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "users" SET "last_login_at"=$1,"updated_at"=$2 WHERE id = $3 AND "users"."deleted_at" IS NULL`)).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), id).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -309,7 +277,7 @@ func TestUserRepository_UpdateLastLogin_Error(t *testing.T) {
 	repo := NewUserRepository(db)
 
 	id := uuid.New()
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "auth_schema"."users" SET "last_login_at"=$1,"updated_at"=$2 WHERE id = $3 AND "users"."deleted_at" IS NULL`)).
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "users" SET "last_login_at"=$1,"updated_at"=$2 WHERE id = $3 AND "users"."deleted_at" IS NULL`)).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), id).
 		WillReturnError(gorm.ErrInvalidDB)
 
@@ -325,7 +293,7 @@ func TestUserRepository_UpdateRole(t *testing.T) {
 
 	userID := uuid.New()
 	roleID := uuid.New()
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "auth_schema"."users" SET "role_id"=$1,"updated_at"=$2 WHERE id = $3 AND "users"."deleted_at" IS NULL`)).
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "users" SET "role_id"=$1,"updated_at"=$2 WHERE id = $3 AND "users"."deleted_at" IS NULL`)).
 		WithArgs(roleID, sqlmock.AnyArg(), userID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
@@ -342,14 +310,14 @@ func TestUserRepository_FindRoleByName(t *testing.T) {
 	rows := sqlmock.NewRows([]string{"id", "name", "description", "created_at", "updated_at"}).
 		AddRow(roleID, "admin", "Admin role", nil, nil)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."roles" WHERE name = $1 ORDER BY "roles"."id" LIMIT $2`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "roles" WHERE name = $1 ORDER BY "roles"."id" LIMIT $2`)).
 		WithArgs("admin", 1).
 		WillReturnRows(rows)
 
 	// Permissions preload
 	permRows := sqlmock.NewRows([]string{"id", "role_id", "scope", "created_at"}).
 		AddRow(uuid.New(), roleID, "server:create", nil)
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."role_permissions" WHERE "role_permissions"."role_id" = $1`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "role_permissions" WHERE "role_permissions"."role_id" = $1`)).
 		WithArgs(roleID).
 		WillReturnRows(permRows)
 
@@ -366,7 +334,7 @@ func TestUserRepository_FindRoleByName_NotFound(t *testing.T) {
 	db, mock := setupAuthTestDB(t)
 	repo := NewUserRepository(db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "auth_schema"."roles"`)).
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "roles"`)).
 		WithArgs("missing", 1).
 		WillReturnError(gorm.ErrRecordNotFound)
 

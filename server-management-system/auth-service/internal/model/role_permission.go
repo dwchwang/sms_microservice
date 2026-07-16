@@ -15,4 +15,4 @@ type RolePermission struct {
 }
 
 // TableName overrides the default table name for GORM.
-func (RolePermission) TableName() string { return "auth_schema.role_permissions" }
+func (RolePermission) TableName() string { return "role_permissions" }

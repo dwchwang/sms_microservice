@@ -11,7 +11,6 @@ type Config struct {
 	App      AppConfig
 	Database DatabaseConfig
 	Redis    RedisConfig
-	Kafka    KafkaConfig
 	Log      LogConfig
 }
 
@@ -24,20 +23,19 @@ type AppConfig struct {
 
 // DatabaseConfig holds PostgreSQL connection configuration.
 type DatabaseConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	DBName   string
-	Schema   string
-	SSLMode  string
+	Host     string `env:"SERVER_DB_HOST" envDefault:"localhost"`
+	Port     int    `env:"SERVER_DB_PORT" envDefault:"5432"`
+	Name     string `env:"SERVER_DB_NAME" envDefault:"server_db"`
+	User     string `env:"SERVER_DB_USER" envDefault:"server_user_v2"`
+	Password string `env:"SERVER_DB_PASSWORD" envDefault:"server_pass_secret_v2"`
+	SSLMode  string `env:"SERVER_DB_SSLMODE" envDefault:"disable"`
 }
 
 // DSN returns the PostgreSQL connection string.
 func (c DatabaseConfig) DSN() string {
 	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s search_path=%s",
-		c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode, c.Schema,
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		c.Host, c.Port, c.User, c.Password, c.Name, c.SSLMode,
 	)
 }
 
@@ -52,11 +50,6 @@ type RedisConfig struct {
 // Addr returns the Redis address string.
 func (c RedisConfig) Addr() string {
 	return fmt.Sprintf("%s:%s", c.Host, c.Port)
-}
-
-// KafkaConfig holds Kafka connection configuration.
-type KafkaConfig struct {
-	Brokers string
 }
 
 // LogConfig holds logging configuration.
@@ -83,19 +76,16 @@ func LoadConfig() *Config {
 	viper.SetDefault("APP_ENV", "development")
 
 	viper.SetDefault("SERVER_DB_HOST", "localhost")
-	viper.SetDefault("SERVER_DB_PORT", "5432")
-	viper.SetDefault("SERVER_DB_USER", "server_user")
-	viper.SetDefault("SERVER_DB_PASSWORD", "server_pass_secret")
-	viper.SetDefault("SERVER_DB_NAME", "vcs_sms")
-	viper.SetDefault("SERVER_DB_SCHEMA", "server_schema")
+	viper.SetDefault("SERVER_DB_PORT", 5432)
+	viper.SetDefault("SERVER_DB_USER", "server_user_v2")
+	viper.SetDefault("SERVER_DB_PASSWORD", "server_pass_secret_v2")
+	viper.SetDefault("SERVER_DB_NAME", "server_db")
 	viper.SetDefault("SERVER_DB_SSLMODE", "disable")
 
 	viper.SetDefault("REDIS_HOST", "localhost")
 	viper.SetDefault("REDIS_PORT", "6379")
 	viper.SetDefault("REDIS_PASSWORD", "")
 	viper.SetDefault("REDIS_DB", 1)
-
-	viper.SetDefault("KAFKA_BROKERS", "localhost:9092")
 
 	viper.SetDefault("LOG_LEVEL", "debug")
 	viper.SetDefault("LOG_DIR", "logs/server")
@@ -112,11 +102,10 @@ func LoadConfig() *Config {
 		},
 		Database: DatabaseConfig{
 			Host:     viper.GetString("SERVER_DB_HOST"),
-			Port:     viper.GetString("SERVER_DB_PORT"),
+			Port:     viper.GetInt("SERVER_DB_PORT"),
 			User:     viper.GetString("SERVER_DB_USER"),
 			Password: viper.GetString("SERVER_DB_PASSWORD"),
-			DBName:   viper.GetString("SERVER_DB_NAME"),
-			Schema:   viper.GetString("SERVER_DB_SCHEMA"),
+			Name:     viper.GetString("SERVER_DB_NAME"),
 			SSLMode:  viper.GetString("SERVER_DB_SSLMODE"),
 		},
 		Redis: RedisConfig{
@@ -124,9 +113,6 @@ func LoadConfig() *Config {
 			Port:     viper.GetString("REDIS_PORT"),
 			Password: viper.GetString("REDIS_PASSWORD"),
 			DB:       viper.GetInt("REDIS_DB"),
-		},
-		Kafka: KafkaConfig{
-			Brokers: viper.GetString("KAFKA_BROKERS"),
 		},
 		Log: LogConfig{
 			Level:      viper.GetString("LOG_LEVEL"),

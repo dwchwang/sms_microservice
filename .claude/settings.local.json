@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(npx eslint *)",
+      "Bash(npm install *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(npm -v)",
+      "Bash(echo \"npm: $\\(npm -v || echo MISSING\\)\")",
+      "Bash(npx -v)",
+      "Bash(echo \"npx: $\\(npx -v || echo MISSING\\)\")",
+      "Bash(timeout 8 npm ping)",
+      "Bash(npx --yes create-next-app@latest web --ts --tailwind --app --eslint --src-dir --import-alias \"@/*\" --turbopack --no-git)",
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\({next:p.dependencies.next,react:p.dependencies.react,tw:p.devDependencies.tailwindcss||p.dependencies.tailwindcss},null,0\\)\\)\")",
+      "Bash(npm i *)",
+      "Bash(awk 'NR>=120 && NR<=320 && /^#{2,4} /' version-16.md)",
+      "Bash(node -e \"const p=require\\('./node_modules/geist/package.json'\\); console.log\\(Object.keys\\(p.exports||{}\\).join\\('\\\\n'\\)\\)\")",
+      "Bash(node -e \"console.log\\('tailwindcss', require\\('./node_modules/tailwindcss/package.json'\\).version\\)\")",
+      "Bash(npx next *)",
+      "Bash(PORT=3100 npx next start -p 3100)",
+      "Bash(echo \"pid $!\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3100/login)",
+      "Bash(curl -s http://localhost:3100/login)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" --max-time 3 http://localhost:3100/login)",
+      "Bash(fuser -k 3100/tcp)",
+      "Bash(grep -nA25 \"func.*GetAllActiveServers\" internal/repository/server_reader.go)",
+      "Bash(grep -rnA8 \"func.*SetNX\\\\|func.*ReleaseLock\\\\|func.*\\) Get\\(\\\\|func.*\\) Set\\(\" internal/scheduler/redis_client.go)",
+      "Bash(grep -nA40 \"func.*Check\")",
+      "Bash(go version *)",
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(docker exec *)",
+      "Bash(docker compose *)",
+      "Bash(go run *)"
+    ]
+  }
+}

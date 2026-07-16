@@ -10,7 +10,6 @@ import (
 // User represents a system user with authentication and role information.
 type User struct {
 	ID           uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Username     string         `gorm:"type:varchar(100);uniqueIndex;not null" json:"username"`
 	Email        string         `gorm:"type:varchar(255);uniqueIndex;not null" json:"email"`
 	PasswordHash string         `gorm:"type:varchar(255);not null" json:"-"`
 	FullName     string         `gorm:"type:varchar(255)" json:"full_name"`
@@ -24,4 +23,4 @@ type User struct {
 }
 
 // TableName overrides the default table name for GORM.
-func (User) TableName() string { return "auth_schema.users" }
+func (User) TableName() string { return "users" }

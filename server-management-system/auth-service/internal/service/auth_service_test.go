@@ -20,7 +20,7 @@ import (
 // ── Mock Repository ──
 
 type mockUserRepo struct {
-	users             map[string]*model.User // key = username
+	users             map[string]*model.User // key = Email
 	usersByID         map[uuid.UUID]*model.User
 	usersByEmail      map[string]*model.User
 	roles             map[string]*model.Role
@@ -102,27 +102,20 @@ func (m *mockUserRepo) Create(ctx context.Context, user *model.User) error {
 	if m.createShouldFail {
 		return errors.New("db error")
 	}
-	m.users[user.Username] = user
+	m.users[user.Email] = user
 	m.usersByID[user.ID] = user
 	m.usersByEmail[user.Email] = user
 	return nil
 }
 
-func (m *mockUserRepo) FindByUsername(ctx context.Context, username string) (*model.User, error) {
-	u, ok := m.users[username]
+func (m *mockUserRepo) FindByEmail(ctx context.Context, Email string) (*model.User, error) {
+	u, ok := m.users[Email]
 	if !ok {
 		return nil, gorm.ErrRecordNotFound
 	}
 	return u, nil
 }
 
-func (m *mockUserRepo) FindByEmail(ctx context.Context, email string) (*model.User, error) {
-	u, ok := m.usersByEmail[email]
-	if !ok {
-		return nil, gorm.ErrRecordNotFound
-	}
-	return u, nil
-}
 
 func (m *mockUserRepo) FindByID(ctx context.Context, id uuid.UUID) (*model.User, error) {
 	u, ok := m.usersByID[id]
@@ -210,6 +203,15 @@ func (m *mockUserRepo) UpdateRole(ctx context.Context, userID uuid.UUID, roleID 
 	return nil
 }
 
+func (m *mockUserRepo) UpdatePassword(ctx context.Context, id uuid.UUID, newHash string) error {
+	u, ok := m.usersByID[id]
+	if !ok {
+		return gorm.ErrRecordNotFound
+	}
+	u.PasswordHash = newHash
+	return nil
+}
+
 func (m *mockUserRepo) addRole(name string, scopes []string) *model.Role {
 	roleID := uuid.New()
 	r := &model.Role{
@@ -228,21 +230,20 @@ func (m *mockUserRepo) addRole(name string, scopes []string) *model.Role {
 	return r
 }
 
-func (m *mockUserRepo) addUser(username, email, password, roleName string, active bool) *model.User {
+func (m *mockUserRepo) addUser(Email, email, password, roleName string, active bool) *model.User {
 	hashed, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	role := m.roles[roleName]
 	u := &model.User{
 		ID:           uuid.New(),
-		Username:     username,
 		Email:        email,
 		PasswordHash: string(hashed),
-		FullName:     username + " Full",
+		FullName:     Email + " Full",
 		RoleID:       role.ID,
 		IsActive:     active,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
-	m.users[username] = u
+	m.users[Email] = u
 	m.usersByID[u.ID] = u
 	m.usersByEmail[email] = u
 	return u
@@ -256,7 +257,7 @@ func newTestAuthService() (AuthService, *mockUserRepo) {
 	repo.addRole("admin", []string{
 		"server:create", "server:read", "server:update", "server:delete",
 		"server:import", "server:export", "monitor:view",
-		"report:view", "report:send", "user:manage",
+		"report:view", "report:send", "user:list", "user:manage_role",
 	})
 	repo.addRole("operator", []string{
 		"server:create", "server:read", "server:update",
@@ -319,7 +320,6 @@ func TestRegister_Success(t *testing.T) {
 	svc, _ := newTestAuthService()
 
 	req := &dto.RegisterRequest{
-		Username: "newuser",
 		Email:    "new@test.com",
 		Password: "password123",
 		FullName: "New User",
@@ -329,8 +329,8 @@ func TestRegister_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
-	if resp.Username != "newuser" {
-		t.Errorf("expected username 'newuser', got '%s'", resp.Username)
+	if resp.Email != "new@test.com" {
+		t.Errorf("expected Email 'new@test.com', got '%s'", resp.Email)
 	}
 	if resp.Role != "viewer" {
 		t.Errorf("expected role 'viewer' (default), got '%s'", resp.Role)
@@ -338,37 +338,19 @@ func TestRegister_Success(t *testing.T) {
 	assertScopes(t, resp.Scopes, "server:read", "server:export", "report:view")
 }
 
-func TestRegister_DuplicateUsername(t *testing.T) {
+func TestRegister_DuplicateEmail(t *testing.T) {
 	svc, repo := newTestAuthService()
-	repo.addUser("existing", "existing@test.com", "pass", "viewer", true)
+	repo.addUser("existing@test.com", "existing@test.com", "pass", "viewer", true)
 
 	req := &dto.RegisterRequest{
-		Username: "existing",
-		Email:    "other@test.com",
+		Email:    "existing@test.com",
 		Password: "password123",
 		FullName: "Dupe User",
 	}
 
 	_, err := svc.Register(context.Background(), req)
 	if err == nil {
-		t.Fatal("expected error for duplicate username")
-	}
-}
-
-func TestRegister_DuplicateEmail(t *testing.T) {
-	svc, repo := newTestAuthService()
-	repo.addUser("user1", "taken@test.com", "pass", "viewer", true)
-
-	req := &dto.RegisterRequest{
-		Username: "user2",
-		Email:    "taken@test.com",
-		Password: "password123",
-		FullName: "Dupe Email",
-	}
-
-	_, err := svc.Register(context.Background(), req)
-	if err == nil {
-		t.Fatal("expected error for duplicate email")
+		t.Fatal("expected error for duplicate Email")
 	}
 }
 
@@ -377,7 +359,6 @@ func TestRegister_CreateError(t *testing.T) {
 	repo.createShouldFail = true
 
 	req := &dto.RegisterRequest{
-		Username: "createfail",
 		Email:    "createfail@test.com",
 		Password: "password123",
 		FullName: "Create Fail",
@@ -394,7 +375,7 @@ func TestRegister_DefaultRoleMissing(t *testing.T) {
 	delete(repo.roles, "viewer")
 
 	req := &dto.RegisterRequest{
-		Username: "norole",
+		// Email: "norole",
 		Email:    "norole@test.com",
 		Password: "password123",
 		FullName: "No Role",
@@ -556,7 +537,7 @@ func TestLogin_Success(t *testing.T) {
 	svcImpl.redis = newFakeRedis()
 
 	req := &dto.LoginRequest{
-		Username: "testuser",
+		Email: "testuser",
 		Password: "password123",
 	}
 
@@ -580,7 +561,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 	repo.addUser("testuser", "test@test.com", "password123", "admin", true)
 
 	req := &dto.LoginRequest{
-		Username: "testuser",
+		Email: "testuser",
 		Password: "wrongpassword",
 	}
 
@@ -594,7 +575,7 @@ func TestLogin_UserNotFound(t *testing.T) {
 	svc, _ := newTestAuthService()
 
 	req := &dto.LoginRequest{
-		Username: "nonexistent",
+		Email: "nonexistent",
 		Password: "password",
 	}
 
@@ -609,7 +590,7 @@ func TestLogin_InactiveUser(t *testing.T) {
 	repo.addUser("inactive", "inactive@test.com", "password123", "admin", false)
 
 	req := &dto.LoginRequest{
-		Username: "inactive",
+		Email: "inactive",
 		Password: "password123",
 	}
 
@@ -625,7 +606,7 @@ func TestLogin_LoadRoleError(t *testing.T) {
 	delete(repo.usersByID, u.ID)
 
 	req := &dto.LoginRequest{
-		Username: "noroleload",
+		Email: "noroleload",
 		Password: "password123",
 	}
 
@@ -643,7 +624,7 @@ func TestLogin_StoreRefreshTokenError(t *testing.T) {
 	svcImpl.redis = &fakeRedis{values: make(map[string]string), ints: make(map[string]int64), setErr: errors.New("redis down")}
 
 	_, err := svc.Login(context.Background(), &dto.LoginRequest{
-		Username: "redisfail",
+		Email: "redisfail",
 		Password: "password123",
 	})
 	if err == nil {
@@ -661,7 +642,7 @@ func TestLogin_TooManyAttempts(t *testing.T) {
 	svcImpl.redis = rdb
 
 	_, err := svc.Login(context.Background(), &dto.LoginRequest{
-		Username: "locked",
+		Email: "locked",
 		Password: "password123",
 	})
 	if !errors.Is(err, ErrTooManyAttempts) {
@@ -678,7 +659,7 @@ func TestLogin_WrongPasswordRecordsFailedAttempt(t *testing.T) {
 	svcImpl.redis = rdb
 
 	_, err := svc.Login(context.Background(), &dto.LoginRequest{
-		Username: "attempt",
+		Email: "attempt",
 		Password: "wrongpassword",
 	})
 	if !errors.Is(err, ErrInvalidCredentials) {
@@ -699,8 +680,8 @@ func TestGetProfile_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProfile failed: %v", err)
 	}
-	if resp.Username != "profileuser" {
-		t.Errorf("expected username 'profileuser', got '%s'", resp.Username)
+	if resp.Email != "profile@test.com" {
+		t.Errorf("expected Email 'profile@test.com', got '%s'", resp.Email)
 	}
 	if resp.Role != "admin" {
 		t.Errorf("expected role 'admin', got '%s'", resp.Role)
@@ -919,8 +900,8 @@ func TestLogout_ExpiredAccessTokenDeletesRefreshOnly(t *testing.T) {
 // ── Error Types Tests ──
 
 func TestErrorTypes(t *testing.T) {
-	if ErrInvalidCredentials == ErrDuplicateUsername {
-		t.Error("ErrInvalidCredentials and ErrDuplicateUsername should be distinct")
+	if ErrInvalidCredentials == ErrDuplicateEmail {
+		t.Error("ErrInvalidCredentials and ErrDuplicateEmail should be distinct")
 	}
 	if ErrUserNotFound == ErrRoleNotFound {
 		t.Error("ErrUserNotFound and ErrRoleNotFound should be distinct")

@@ -1,0 +1,18 @@
+# Static configuration
+entryPoints:
+  web:
+    address: ":8080"
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+
+api:
+  dashboard: false
+
+log:
+  level: INFO
+
+accessLog:
+  filePath: /var/log/traefik/access.log

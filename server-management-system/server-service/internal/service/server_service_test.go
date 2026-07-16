@@ -7,10 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/vcs-sms/server-service/internal/dto"
 	"github.com/vcs-sms/server-service/internal/model"
-	"github.com/vcs-sms/shared/kafka"
 	"gorm.io/gorm"
 )
 
@@ -33,9 +31,8 @@ type mockServerRepo struct {
 type fakeServerCache struct {
 	values      map[string]string
 	deletedKeys []string
-	scanKeys    []string
 	getErr      error
-	scanErr     error
+	incrErr     error
 }
 
 func newFakeServerCache() *fakeServerCache {
@@ -66,11 +63,13 @@ func (c *fakeServerCache) Del(ctx context.Context, keys ...string) error {
 	return nil
 }
 
-func (c *fakeServerCache) ScanKeys(ctx context.Context, pattern string, count int64) ([]string, error) {
-	if c.scanErr != nil {
-		return nil, c.scanErr
+func (c *fakeServerCache) Incr(ctx context.Context, key string) error {
+	if c.incrErr != nil {
+		return c.incrErr
 	}
-	return c.scanKeys, nil
+	// fake increment
+	c.values[key] = "1"
+	return nil
 }
 
 func newMockServerRepo() *mockServerRepo {
@@ -171,15 +170,13 @@ func (m *mockServerRepo) ExistsByServerNameExclude(ctx context.Context, serverNa
 
 func newTestServerService() (ServerService, *mockServerRepo) {
 	repo := newMockServerRepo()
-	producer := kafka.NewDummyProducer(zerolog.Logger{})
-	svc := NewServerService(repo, nil, producer)
+	svc := NewServerService(repo, nil)
 	return svc, repo
 }
 
 func newTestServerServiceWithCache(cache serverCache) (ServerService, *mockServerRepo) {
 	repo := newMockServerRepo()
-	producer := kafka.NewDummyProducer(zerolog.Logger{})
-	svc := &serverServiceImpl{repo: repo, cache: cache, producer: producer}
+	svc := &serverServiceImpl{repo: repo, cache: cache}
 	return svc, repo
 }
 
@@ -188,7 +185,7 @@ func makeServer(id, name, ip string) *model.Server {
 	return &model.Server{
 		ServerID:   id,
 		ServerName: name,
-		Status:     "off",
+		Status:     "UNKNOWN",
 		IPv4:       ip,
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -214,8 +211,8 @@ func TestCreateServer_Success(t *testing.T) {
 	if resp.ServerID != "SRV-001" {
 		t.Errorf("expected ServerID 'SRV-001', got '%s'", resp.ServerID)
 	}
-	if resp.Status != "off" {
-		t.Errorf("expected Status 'off', got '%s'", resp.Status)
+	if resp.Status != "UNKNOWN" {
+		t.Errorf("expected Status 'UNKNOWN', got '%s'", resp.Status)
 	}
 }
 
@@ -383,7 +380,7 @@ func TestListServers_ReturnsCachedResponse(t *testing.T) {
 	filter := &dto.ServerFilter{Page: 1, PageSize: 20}
 	cached := dto.ListServerResponse{Servers: []dto.ServerResponse{{ServerID: "SRV-001", ServerName: "cached"}}, Total: 1, Page: 1, PageSize: 20, TotalPages: 1}
 	data, _ := json.Marshal(cached)
-	cache.values[buildListCacheKey(filter)] = string(data)
+	cache.values[buildListCacheKey(filter, "0")] = string(data)
 	svc, repo := newTestServerServiceWithCache(cache)
 	repo.findAllShouldFail = true
 
@@ -399,7 +396,7 @@ func TestListServers_ReturnsCachedResponse(t *testing.T) {
 func TestListServers_IgnoresMalformedCacheAndStoresResult(t *testing.T) {
 	cache := newFakeServerCache()
 	filter := &dto.ServerFilter{Page: 1, PageSize: 20}
-	cache.values[buildListCacheKey(filter)] = "{bad json"
+	cache.values[buildListCacheKey(filter, "0")] = "{bad json"
 	svc, repo := newTestServerServiceWithCache(cache)
 	repo.addServer(makeServer("SRV-001", "from-db", "10.0.0.1"))
 
@@ -410,7 +407,7 @@ func TestListServers_IgnoresMalformedCacheAndStoresResult(t *testing.T) {
 	if resp.Total != 1 || resp.Servers[0].ServerName != "from-db" {
 		t.Fatalf("expected DB list, got %#v", resp)
 	}
-	if cache.values[buildListCacheKey(filter)] == "{bad json" {
+	if cache.values[buildListCacheKey(filter, "0")] == "{bad json" {
 		t.Fatal("expected malformed cache to be replaced")
 	}
 }
@@ -508,8 +505,8 @@ func TestUpdateServer_AllFieldsAndSameName(t *testing.T) {
 	ipv4 := "10.0.0.2"
 	osName := "Debian"
 	cpu := 8
-	ram := 32.0
-	disk := 512.0
+	ram := 32
+	disk := 512
 	location := "DC-HN"
 	description := "updated"
 	resp, err := svc.UpdateServer(context.Background(), "SRV-001", &dto.UpdateServerRequest{
@@ -525,7 +522,7 @@ func TestUpdateServer_AllFieldsAndSameName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateServer failed: %v", err)
 	}
-	if resp.IPv4 != ipv4 || resp.OS != osName || *resp.CPUCores != cpu || *resp.RAMGB != ram || *resp.DiskGB != disk || resp.Location != location || resp.Description != description {
+	if resp.IPv4 != ipv4 || resp.OS != osName || resp.CPUCores != cpu || resp.RAMGB != ram || resp.DiskGB != disk || resp.Location != location || resp.Description != description {
 		t.Fatalf("fields were not updated: %#v", resp)
 	}
 }
@@ -599,36 +596,24 @@ func TestDeleteServer_DeleteError(t *testing.T) {
 	}
 }
 
-func TestInvalidateCacheDeletesDetailAndListKeys(t *testing.T) {
+func TestInvalidateCacheBumpsListVersion(t *testing.T) {
 	cache := newFakeServerCache()
 	cache.values["server:detail:SRV-001"] = "{}"
-	cache.values["servers:list:a"] = "{}"
-	cache.values["servers:list:b"] = "{}"
-	cache.scanKeys = []string{"servers:list:a", "servers:list:b"}
 	svc, _ := newTestServerServiceWithCache(cache)
 
 	svc.(*serverServiceImpl).invalidateCache(context.Background(), "SRV-001")
 
-	if len(cache.deletedKeys) != 3 {
-		t.Fatalf("expected detail plus two list keys deleted, got %#v", cache.deletedKeys)
+	if len(cache.deletedKeys) != 1 {
+		t.Fatalf("expected detail key deleted")
 	}
-}
-
-func TestInvalidateCacheStopsWhenScanFails(t *testing.T) {
-	cache := newFakeServerCache()
-	cache.scanErr = errors.New("scan failed")
-	svc, _ := newTestServerServiceWithCache(cache)
-
-	svc.(*serverServiceImpl).invalidateCache(context.Background(), "SRV-001")
-
-	if len(cache.deletedKeys) != 1 || cache.deletedKeys[0] != "server:detail:SRV-001" {
-		t.Fatalf("expected only detail key deleted, got %#v", cache.deletedKeys)
+	if cache.values["server:list:version"] != "1" {
+		t.Fatalf("expected list version to be bumped")
 	}
 }
 
 func TestBuildListCacheKey_DiffersByFilter(t *testing.T) {
-	a := buildListCacheKey(&dto.ServerFilter{Status: "on", Page: 1, PageSize: 20})
-	b := buildListCacheKey(&dto.ServerFilter{Status: "off", Page: 1, PageSize: 20})
+	a := buildListCacheKey(&dto.ServerFilter{Status: "on", Page: 1, PageSize: 20}, "0")
+	b := buildListCacheKey(&dto.ServerFilter{Status: "off", Page: 1, PageSize: 20}, "0")
 	if a == b {
 		t.Fatal("expected different cache keys for different filters")
 	}

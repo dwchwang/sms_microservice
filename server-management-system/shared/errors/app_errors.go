@@ -69,16 +69,12 @@ var (
 		Message:  "Email đã được sử dụng",
 	}
 
-	ErrDuplicateUsername = &AppError{
-		HTTPCode: http.StatusConflict,
-		Code:     "DUPLICATE_USERNAME",
-		Message:  "Username đã tồn tại",
-	}
+
 
 	ErrInvalidCredentials = &AppError{
 		HTTPCode: http.StatusUnauthorized,
 		Code:     "INVALID_CREDENTIALS",
-		Message:  "Username hoặc password không đúng",
+		Message:  "Email hoặc password không đúng",
 	}
 
 	ErrInactiveUser = &AppError{

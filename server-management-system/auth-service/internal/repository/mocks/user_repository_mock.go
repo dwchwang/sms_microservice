@@ -10,7 +10,6 @@ import (
 // UserRepositoryMock is a test mock for UserRepository.
 type UserRepositoryMock struct {
 	CreateFunc           func(ctx context.Context, user *model.User) error
-	FindByUsernameFunc   func(ctx context.Context, username string) (*model.User, error)
 	FindByEmailFunc      func(ctx context.Context, email string) (*model.User, error)
 	FindByIDFunc         func(ctx context.Context, id uuid.UUID) (*model.User, error)
 	FindByIDWithRoleFunc func(ctx context.Context, id uuid.UUID) (*model.User, error)
@@ -18,6 +17,7 @@ type UserRepositoryMock struct {
 	FindAllUsersFunc     func(ctx context.Context, page, pageSize int) ([]model.User, int64, error)
 	UpdateLastLoginFunc  func(ctx context.Context, id uuid.UUID) error
 	UpdateRoleFunc       func(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error
+	UpdatePasswordFunc   func(ctx context.Context, id uuid.UUID, newHash string) error
 	FindRoleByNameFunc   func(ctx context.Context, name string) (*model.Role, error)
 }
 
@@ -28,12 +28,6 @@ func (m *UserRepositoryMock) Create(ctx context.Context, user *model.User) error
 	return nil
 }
 
-func (m *UserRepositoryMock) FindByUsername(ctx context.Context, username string) (*model.User, error) {
-	if m.FindByUsernameFunc != nil {
-		return m.FindByUsernameFunc(ctx, username)
-	}
-	return nil, nil
-}
 
 func (m *UserRepositoryMock) FindByEmail(ctx context.Context, email string) (*model.User, error) {
 	if m.FindByEmailFunc != nil {
@@ -87,6 +81,13 @@ func (m *UserRepositoryMock) FindAllUsers(ctx context.Context, page, pageSize in
 func (m *UserRepositoryMock) UpdateRole(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error {
 	if m.UpdateRoleFunc != nil {
 		return m.UpdateRoleFunc(ctx, userID, roleID)
+	}
+	return nil
+}
+
+func (m *UserRepositoryMock) UpdatePassword(ctx context.Context, id uuid.UUID, newHash string) error {
+	if m.UpdatePasswordFunc != nil {
+		return m.UpdatePasswordFunc(ctx, id, newHash)
 	}
 	return nil
 }

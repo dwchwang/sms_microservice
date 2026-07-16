@@ -1,13 +1,13 @@
 # VCS-SMS Makefile
 # =============================================
 
-.PHONY: help dev-up dev-down infra-up infra-down build test coverage seed logs clean
+.PHONY: help dev-up dev-down infra-up infra-down build test coverage seed logs clean rebuild-db
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 # ── Infrastructure ──
-infra-up: ## Start infrastructure containers (Postgres, Redis, ES, Kafka, TCP Sim)
+infra-up: ## Start infrastructure containers (Postgres, Redis, ES, TCP Sim)
 	docker-compose -f docker-compose.dev.yml up -d
 
 infra-down: ## Stop infrastructure containers
@@ -35,8 +35,6 @@ test: ## Run all tests with coverage
 	cd auth-service && go test ./... -cover -count=1 -v
 	@echo "=== Testing server-service ==="
 	cd server-service && go test ./... -cover -count=1 -v
-	@echo "=== Testing api-gateway ==="
-	cd api-gateway && go test ./... -cover -count=1 -v
 	@echo "=== Testing monitor-service ==="
 	cd monitor-service && go test ./... -cover -count=1 -v
 	@echo "=== Testing report-service ==="
@@ -48,7 +46,7 @@ test: ## Run all tests with coverage
 	@echo "All tests completed."
 
 coverage: ## Generate HTML coverage reports
-	@for svc in shared auth-service server-service api-gateway monitor-service report-service fileio-service tcp-simulator; do \
+	@for svc in shared auth-service server-service monitor-service report-service fileio-service tcp-simulator; do \
 		echo ">>> $$svc coverage:"; \
 		cd $$svc && go test ./... -coverprofile=coverage.out -covermode=atomic -count=1; \
 		go tool cover -func=coverage.out | tail -1; \
@@ -69,7 +67,6 @@ deps: ## Install all dependencies
 	cd shared && go mod tidy
 	cd auth-service && go mod tidy
 	cd server-service && go mod tidy
-	cd api-gateway && go mod tidy
 	cd monitor-service && go mod tidy
 	cd report-service && go mod tidy
 	cd fileio-service && go mod tidy
@@ -77,13 +74,13 @@ deps: ## Install all dependencies
 
 # ── Run ──
 seed: ## Seed 10.000 servers into PostgreSQL
-	docker exec -it vcs-sms-postgres sh -c 'psql -U "$${POSTGRES_USER:-postgres}" -d "$${POSTGRES_DB:-vcs_sms}" -f /seed/seed_10k_servers.sql'
+	docker exec -it vcs-sms-postgres sh -c 'psql -U "$${POSTGRES_USER:-postgres}" -d "server_db" -f /seed/seed_10k_servers.sql'
 
 logs: ## Tail all service logs
 	docker-compose logs -f
 
-logs-gateway: ## Tail gateway logs
-	docker-compose logs -f api-gateway
+logs-traefik: ## Tail traefik logs
+	docker-compose logs -f traefik
 
 logs-monitor: ## Tail monitor logs
 	docker-compose logs -f monitor-service
@@ -93,3 +90,7 @@ clean: ## Clean all containers, volumes, and build artifacts
 	docker-compose down -v
 	rm -rf logs/* uploads/*
 	@echo "Cleaned."
+
+rebuild-db: ## Rebuild database from scratch
+	docker-compose down -v
+	docker-compose up -d postgres

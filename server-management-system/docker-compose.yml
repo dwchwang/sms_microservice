@@ -15,7 +15,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./deployments/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./deployments/docker/postgres/seed_10k_servers.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+      - ./deployments/docker/postgres/init-v2.sql:/docker-entrypoint-initdb.d/02-init-v2.sql
+      - ./deployments/docker/postgres/seed_10k_servers.sql:/docker-entrypoint-initdb.d/03-seed.sql:ro
       - ./deployments/docker/postgres/seed_10k_servers.sql:/seed/seed_10k_servers.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vcs_admin} -d ${POSTGRES_DB:-vcs_sms}"]
@@ -61,53 +62,6 @@ services:
     networks:
       - vcs-network
 
-  kafka:
-    image: apache/kafka:3.9.0
-    container_name: vcs-sms-kafka
-    ports:
-      - "${KAFKA_PORT:-9092}:9092"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:9093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      CLUSTER_ID: "VCS-SMS-Kafka-Cluster-001"
-    healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-    networks:
-      - vcs-network
-
-  kafka-init:
-    image: apache/kafka:3.9.0
-    depends_on:
-      kafka:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command: |
-      "
-      echo 'Creating Kafka topics...'
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic server.created
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic server.updated
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic server.deleted
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --partitions 6 --replication-factor 1 --topic server.status.changed
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic server.health.batch
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic import.job.created
-      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:29092 --partitions 1 --replication-factor 1 --topic report.daily.trigger
-      echo 'Topics created!'
-      /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server kafka:29092
-      "
-    networks:
-      - vcs-network
-
   # ═══════════════════════════════════════
   # TCP Simulator (Fake 10.000 Servers)
   # ═══════════════════════════════════════
@@ -139,30 +93,22 @@ services:
   # Application Services (commented out in dev)
   # ═══════════════════════════════════════
 
-  api-gateway:
-    build:
-      context: .
-      dockerfile: api-gateway/Dockerfile
-    container_name: vcs-sms-gateway
+  traefik:
+    image: traefik:v3.0
+    container_name: vcs-sms-traefik
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
-    env_file:
-      - .env
+    volumes:
+      - ./deployments/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./deployments/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./logs/traefik:/var/log/traefik
     depends_on:
-      redis:
-        condition: service_healthy
       auth-service:
         condition: service_started
       server-service:
         condition: service_started
-      monitor-service:
-        condition: service_started
       report-service:
         condition: service_started
-      fileio-service:
-        condition: service_started
-    volumes:
-      - ./logs/gateway:/var/log/vcs-sms
     networks:
       - vcs-network
 
@@ -199,10 +145,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
-      kafka-init:
-        condition: service_completed_successfully
     volumes:
       - ./logs/server:/var/log/vcs-sms
     networks:
@@ -226,10 +168,6 @@ services:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
-      kafka-init:
-        condition: service_completed_successfully
       tcp-simulator:
         condition: service_healthy
     volumes:
@@ -251,10 +189,6 @@ services:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
-      kafka-init:
-        condition: service_completed_successfully
     volumes:
       - ./logs/report:/var/log/vcs-sms
     networks:
@@ -272,10 +206,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      kafka:
-        condition: service_healthy
-      kafka-init:
-        condition: service_completed_successfully
     volumes:
       - ./logs/fileio:/var/log/vcs-sms
       - ./uploads:/app/uploads
@@ -292,7 +222,7 @@ services:
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:
-      api-gateway:
+      traefik:
         condition: service_started
     networks:
       - vcs-network

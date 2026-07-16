@@ -128,10 +128,10 @@ func (r *serverRepository) Delete(ctx context.Context, serverID string) error {
 		Delete(&model.Server{}).Error
 }
 
-// ExistsByServerID checks if a server with the given server_id already exists.
+// ExistsByServerID checks if a server with the given server_id already exists (including deleted).
 func (r *serverRepository) ExistsByServerID(ctx context.Context, serverID string) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).
+	err := r.db.WithContext(ctx).Unscoped().
 		Model(&model.Server{}).
 		Where("server_id = ?", serverID).
 		Count(&count).Error

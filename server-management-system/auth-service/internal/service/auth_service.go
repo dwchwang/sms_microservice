@@ -12,7 +12,6 @@ import (
 	"github.com/vcs-sms/auth-service/internal/model"
 	"github.com/vcs-sms/auth-service/internal/repository"
 	sharedjwt "github.com/vcs-sms/shared/pkg/jwt"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -55,10 +54,10 @@ func NewAuthService(repo repository.UserRepository, rdb *redis.Client, jwtCfg co
 
 // Register creates a new user account.
 func (s *authServiceImpl) Register(ctx context.Context, req *dto.RegisterRequest) (*dto.UserResponse, error) {
-	// 1. Check username uniqueness
-	existing, err := s.repo.FindByUsername(ctx, req.Username)
+	// 1. Check Email uniqueness
+	existing, err := s.repo.FindByEmail(ctx, req.Email)
 	if err == nil && existing != nil {
-		return nil, ErrDuplicateUsername
+		return nil, ErrDuplicateEmail
 	}
 
 	// 2. Check email uniqueness
@@ -68,7 +67,7 @@ func (s *authServiceImpl) Register(ctx context.Context, req *dto.RegisterRequest
 	}
 
 	// 3. Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hashedPassword, err := HashPassword(req.Password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
@@ -81,7 +80,6 @@ func (s *authServiceImpl) Register(ctx context.Context, req *dto.RegisterRequest
 
 	// 5. Create user
 	user := &model.User{
-		Username:     req.Username,
 		Email:        req.Email,
 		PasswordHash: string(hashedPassword),
 		FullName:     req.FullName,
@@ -100,14 +98,14 @@ func (s *authServiceImpl) Register(ctx context.Context, req *dto.RegisterRequest
 // Login authenticates a user and returns JWT tokens.
 func (s *authServiceImpl) Login(ctx context.Context, req *dto.LoginRequest) (*dto.LoginResponse, error) {
 	// 0. Check brute-force protection
-	if err := s.checkLoginAttempts(ctx, req.Username); err != nil {
+	if err := s.checkLoginAttempts(ctx, req.Email); err != nil {
 		return nil, ErrTooManyAttempts
 	}
 
-	// 1. Find user by username
-	user, err := s.repo.FindByUsername(ctx, req.Username)
+	// 1. Find user by Email
+	user, err := s.repo.FindByEmail(ctx, req.Email)
 	if err != nil {
-		s.recordFailedAttempt(ctx, req.Username)
+		s.recordFailedAttempt(ctx, req.Email)
 		if err == gorm.ErrRecordNotFound {
 			return nil, ErrInvalidCredentials
 		}
@@ -120,14 +118,25 @@ func (s *authServiceImpl) Login(ctx context.Context, req *dto.LoginRequest) (*dt
 	}
 
 	// 3. Verify password
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-		s.recordFailedAttempt(ctx, req.Username)
+	match, needsRehash, err := VerifyPassword(req.Password, user.PasswordHash)
+	if err != nil || !match {
+		s.recordFailedAttempt(ctx, req.Email)
 		return nil, ErrInvalidCredentials
+	}
+
+	// Rehash if needed (e.g. from bcrypt to Argon2id)
+	if needsRehash {
+		newHash, err := HashPassword(req.Password)
+		if err == nil {
+			user.PasswordHash = newHash
+			// Update in DB (best-effort, ignore error if it fails)
+			_ = s.repo.UpdatePassword(ctx, user.ID, newHash)
+		}
 	}
 
 	// Reset failed attempts on successful login
 	if s.redis != nil {
-		s.redis.Del(ctx, fmt.Sprintf("auth:login_attempts:%s", req.Username))
+		s.redis.Del(ctx, fmt.Sprintf("auth:login_attempts:%s", req.Email))
 	}
 
 	// 4. Load role with permissions
@@ -154,7 +163,7 @@ func (s *authServiceImpl) Login(ctx context.Context, req *dto.LoginRequest) (*dt
 	accessToken, _, err := sharedjwt.GenerateAccessToken(
 		jwtSharedCfg,
 		user.ID.String(),
-		user.Username,
+		user.Email,
 		userWithRole.Role.Name,
 		scopes,
 	)
@@ -235,7 +244,7 @@ func (s *authServiceImpl) RefreshToken(ctx context.Context, req *dto.RefreshRequ
 	accessToken, _, err := sharedjwt.GenerateAccessToken(
 		jwtSharedCfg,
 		userID.String(),
-		userWithRole.Username,
+		userWithRole.Email,
 		roleName,
 		scopes,
 	)
@@ -311,7 +320,6 @@ func (s *authServiceImpl) buildUserResponse(user *model.User, role *model.Role) 
 
 	return &dto.UserResponse{
 		ID:        user.ID,
-		Username:  user.Username,
 		Email:     user.Email,
 		FullName:  user.FullName,
 		Role:      role.Name,
@@ -382,11 +390,11 @@ func (s *authServiceImpl) ListUsers(ctx context.Context, page, pageSize int) (*d
 }
 
 // checkLoginAttempts checks if the user has exceeded the maximum failed login attempts.
-func (s *authServiceImpl) checkLoginAttempts(ctx context.Context, username string) error {
+func (s *authServiceImpl) checkLoginAttempts(ctx context.Context, Email string) error {
 	if s.redis == nil {
 		return nil // Pass through if Redis is unavailable
 	}
-	key := fmt.Sprintf("auth:login_attempts:%s", username)
+	key := fmt.Sprintf("auth:login_attempts:%s", Email)
 	count, err := s.redis.Get(ctx, key).Int()
 	if err != nil {
 		return nil // Key doesn't exist yet, no attempts
@@ -397,12 +405,12 @@ func (s *authServiceImpl) checkLoginAttempts(ctx context.Context, username strin
 	return nil
 }
 
-// recordFailedAttempt increments the failed login counter for a username.
-func (s *authServiceImpl) recordFailedAttempt(ctx context.Context, username string) {
+// recordFailedAttempt increments the failed login counter for a Email.
+func (s *authServiceImpl) recordFailedAttempt(ctx context.Context, Email string) {
 	if s.redis == nil {
 		return
 	}
-	key := fmt.Sprintf("auth:login_attempts:%s", username)
+	key := fmt.Sprintf("auth:login_attempts:%s", Email)
 	s.redis.Incr(ctx, key)
 	s.redis.Expire(ctx, key, 15*time.Minute)
 }

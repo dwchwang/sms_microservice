@@ -12,7 +12,6 @@ import (
 // UserRepository defines the interface for user data access.
 type UserRepository interface {
 	Create(ctx context.Context, user *model.User) error
-	FindByUsername(ctx context.Context, username string) (*model.User, error)
 	FindByEmail(ctx context.Context, email string) (*model.User, error)
 	FindByID(ctx context.Context, id uuid.UUID) (*model.User, error)
 	FindByIDWithRole(ctx context.Context, id uuid.UUID) (*model.User, error)
@@ -20,6 +19,7 @@ type UserRepository interface {
 	FindAllUsers(ctx context.Context, page, pageSize int) ([]model.User, int64, error)
 	UpdateLastLogin(ctx context.Context, id uuid.UUID) error
 	UpdateRole(ctx context.Context, userID uuid.UUID, roleID uuid.UUID) error
+	UpdatePassword(ctx context.Context, id uuid.UUID, newHash string) error
 	FindRoleByName(ctx context.Context, name string) (*model.Role, error)
 }
 
@@ -38,17 +38,6 @@ func (r *userRepository) Create(ctx context.Context, user *model.User) error {
 	return r.db.WithContext(ctx).Create(user).Error
 }
 
-// FindByUsername retrieves an active user by username.
-func (r *userRepository) FindByUsername(ctx context.Context, username string) (*model.User, error) {
-	var user model.User
-	err := r.db.WithContext(ctx).
-		Where("username = ?", username).
-		First(&user).Error
-	if err != nil {
-		return nil, err
-	}
-	return &user, nil
-}
 
 // FindByEmail retrieves an active user by email.
 func (r *userRepository) FindByEmail(ctx context.Context, email string) (*model.User, error) {
@@ -149,4 +138,12 @@ func (r *userRepository) UpdateRole(ctx context.Context, userID uuid.UUID, roleI
 		Model(&model.User{}).
 		Where("id = ?", userID).
 		Update("role_id", roleID).Error
+}
+
+// UpdatePassword changes the password hash for a user.
+func (r *userRepository) UpdatePassword(ctx context.Context, id uuid.UUID, newHash string) error {
+	return r.db.WithContext(ctx).
+		Model(&model.User{}).
+		Where("id = ?", id).
+		Update("password_hash", newHash).Error
 }

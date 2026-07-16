@@ -17,7 +17,6 @@ type LoginResponse struct {
 // UserResponse is the public representation of a user.
 type UserResponse struct {
 	ID        uuid.UUID `json:"id"`
-	Username  string    `json:"username"`
 	Email     string    `json:"email"`
 	FullName  string    `json:"full_name"`
 	Role      string    `json:"role"`

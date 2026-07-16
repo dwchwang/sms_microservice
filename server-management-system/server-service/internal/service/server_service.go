@@ -7,12 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/vcs-sms/server-service/internal/dto"
 	"github.com/vcs-sms/server-service/internal/model"
 	"github.com/vcs-sms/server-service/internal/repository"
-	"github.com/vcs-sms/shared/kafka"
 	"gorm.io/gorm"
 )
 
@@ -27,16 +25,15 @@ type ServerService interface {
 
 // serverServiceImpl implements ServerService.
 type serverServiceImpl struct {
-	repo     repository.ServerRepository
-	cache    serverCache
-	producer kafka.Producer
+	repo  repository.ServerRepository
+	cache serverCache
 }
 
 type serverCache interface {
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error
 	Del(ctx context.Context, keys ...string) error
-	ScanKeys(ctx context.Context, pattern string, count int64) ([]string, error)
+	Incr(ctx context.Context, key string) error
 }
 
 type redisServerCache struct {
@@ -55,25 +52,19 @@ func (r *redisServerCache) Del(ctx context.Context, keys ...string) error {
 	return r.client.Del(ctx, keys...).Err()
 }
 
-func (r *redisServerCache) ScanKeys(ctx context.Context, pattern string, count int64) ([]string, error) {
-	iter := r.client.Scan(ctx, 0, pattern, count).Iterator()
-	var keys []string
-	for iter.Next(ctx) {
-		keys = append(keys, iter.Val())
-	}
-	return keys, iter.Err()
+func (r *redisServerCache) Incr(ctx context.Context, key string) error {
+	return r.client.Incr(ctx, key).Err()
 }
 
 // NewServerService creates a new ServerService instance.
-func NewServerService(repo repository.ServerRepository, rdb *redis.Client, prod kafka.Producer) ServerService {
+func NewServerService(repo repository.ServerRepository, rdb *redis.Client) ServerService {
 	var cache serverCache
 	if rdb != nil {
 		cache = &redisServerCache{client: rdb}
 	}
 	return &serverServiceImpl{
-		repo:     repo,
-		cache:    cache,
-		producer: prod,
+		repo:  repo,
+		cache: cache,
 	}
 }
 
@@ -98,11 +89,17 @@ func (s *serverServiceImpl) CreateServer(ctx context.Context, req *dto.CreateSer
 
 	// 2. Build model
 	now := time.Now().UTC()
+	tcpPort := req.TCPPort
+	if tcpPort == 0 {
+		tcpPort = 80 // Default port
+	}
+
 	server := &model.Server{
 		ServerID:    req.ServerID,
 		ServerName:  req.ServerName,
-		Status:      "off",
+		Status:      "UNKNOWN",
 		IPv4:        req.IPv4,
+		TCPPort:     tcpPort,
 		OS:          req.OS,
 		CPUCores:    req.CPUCores,
 		RAMGB:       req.RAMGB,
@@ -120,9 +117,6 @@ func (s *serverServiceImpl) CreateServer(ctx context.Context, req *dto.CreateSer
 
 	// 4. Invalidate cache
 	s.invalidateCache(ctx, req.ServerID)
-
-	// 5. Publish Kafka event (fire-and-forget)
-	s.publishEvent("server.created", req.ServerID, server)
 
 	return mapServerToResponse(server), nil
 }
@@ -162,8 +156,9 @@ func (s *serverServiceImpl) GetServer(ctx context.Context, serverID string) (*dt
 
 // ListServers retrieves servers with filtering and pagination, with Redis cache.
 func (s *serverServiceImpl) ListServers(ctx context.Context, filter *dto.ServerFilter) (*dto.ListServerResponse, error) {
-	// 1. Build cache key from filter params
-	cacheKey := buildListCacheKey(filter)
+	// 1. Get list version and build cache key
+	version := s.getListVersion(ctx)
+	cacheKey := buildListCacheKey(filter, version)
 
 	// 2. Check Redis cache
 	if s.cache != nil {
@@ -242,17 +237,20 @@ func (s *serverServiceImpl) UpdateServer(ctx context.Context, serverID string, r
 	if req.IPv4 != nil {
 		server.IPv4 = *req.IPv4
 	}
+	if req.TCPPort != nil {
+		server.TCPPort = *req.TCPPort
+	}
 	if req.OS != nil {
 		server.OS = *req.OS
 	}
 	if req.CPUCores != nil {
-		server.CPUCores = req.CPUCores
+		server.CPUCores = *req.CPUCores
 	}
 	if req.RAMGB != nil {
-		server.RAMGB = req.RAMGB
+		server.RAMGB = *req.RAMGB
 	}
 	if req.DiskGB != nil {
-		server.DiskGB = req.DiskGB
+		server.DiskGB = *req.DiskGB
 	}
 	if req.Location != nil {
 		server.Location = *req.Location
@@ -269,9 +267,6 @@ func (s *serverServiceImpl) UpdateServer(ctx context.Context, serverID string, r
 
 	// 4. Invalidate cache
 	s.invalidateCache(ctx, serverID)
-
-	// 5. Publish Kafka event
-	s.publishEvent("server.updated", serverID, server)
 
 	return mapServerToResponse(server), nil
 }
@@ -295,67 +290,61 @@ func (s *serverServiceImpl) DeleteServer(ctx context.Context, serverID string) e
 	// 3. Invalidate cache
 	s.invalidateCache(ctx, serverID)
 
-	// 4. Publish Kafka event
-	s.publishEvent("server.deleted", serverID, map[string]string{"server_id": serverID})
-
 	return nil
 }
 
-// invalidateCache removes related Redis cache entries.
+// bumpListVersion increments the cache version for list queries.
+func (s *serverServiceImpl) bumpListVersion(ctx context.Context) {
+	if s.cache != nil {
+		_ = s.cache.Incr(ctx, "server:list:version")
+	}
+}
+
+// getListVersion gets the current cache version for list queries.
+func (s *serverServiceImpl) getListVersion(ctx context.Context) string {
+	if s.cache != nil {
+		ver, err := s.cache.Get(ctx, "server:list:version")
+		if err == nil {
+			return ver
+		}
+	}
+	return "0"
+}
+
+// invalidateCache removes related Redis cache entries and bumps list version.
 func (s *serverServiceImpl) invalidateCache(ctx context.Context, serverID string) {
 	if s.cache == nil {
 		return
 	}
 	_ = s.cache.Del(ctx, fmt.Sprintf("server:detail:%s", serverID))
-
-	// Delete all list caches (SCAN pattern)
-	keys, err := s.cache.ScanKeys(ctx, "servers:list:*", 100)
-	if err != nil {
-		return
-	}
-	for _, key := range keys {
-		_ = s.cache.Del(ctx, key)
-	}
-}
-
-// publishEvent sends an event to Kafka (non-blocking, errors logged).
-func (s *serverServiceImpl) publishEvent(eventType, serverID string, data interface{}) {
-	event := &kafka.Event{
-		EventID:   uuid.New().String(),
-		EventType: eventType,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Source:    "server-service",
-		Data:      data,
-	}
-	if err := s.producer.Publish(context.Background(), eventType, serverID, event); err != nil {
-		// Log but don't block the request
-		fmt.Printf("[Kafka] Failed to publish %s: %v\n", eventType, err)
-	}
+	s.bumpListVersion(ctx)
 }
 
 // mapServerToResponse converts a model.Server to a dto.ServerResponse.
 func mapServerToResponse(s *model.Server) *dto.ServerResponse {
 	return &dto.ServerResponse{
-		ServerID:    s.ServerID,
-		ServerName:  s.ServerName,
-		Status:      s.Status,
-		IPv4:        s.IPv4,
-		OS:          s.OS,
-		CPUCores:    s.CPUCores,
-		RAMGB:       s.RAMGB,
-		DiskGB:      s.DiskGB,
-		Location:    s.Location,
-		Description: s.Description,
-		CreatedAt:   s.CreatedAt,
-		UpdatedAt:   s.UpdatedAt,
+		ServerID:        s.ServerID,
+		ServerName:      s.ServerName,
+		Status:          s.Status,
+		StatusChangedAt: s.StatusChangedAt,
+		IPv4:            s.IPv4,
+		TCPPort:         s.TCPPort,
+		OS:              s.OS,
+		CPUCores:        s.CPUCores,
+		RAMGB:           s.RAMGB,
+		DiskGB:          s.DiskGB,
+		Location:        s.Location,
+		Description:     s.Description,
+		CreatedAt:       s.CreatedAt,
+		UpdatedAt:       s.UpdatedAt,
 	}
 }
 
-// buildListCacheKey creates a deterministic cache key from filter parameters.
-func buildListCacheKey(f *dto.ServerFilter) string {
+// buildListCacheKey creates a deterministic cache key from filter parameters and cache version.
+func buildListCacheKey(f *dto.ServerFilter, version string) string {
 	data := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%d|%d",
 		f.Status, f.ServerID, f.ServerName, f.IPv4, f.OS, f.Location,
 		f.SortBy, f.SortOrder, f.Page, f.PageSize,
 	)
-	return fmt.Sprintf("servers:list:%x", sha256.Sum256([]byte(data)))
+	return fmt.Sprintf("servers:list:%s:%x", version, sha256.Sum256([]byte(data)))
 }

@@ -73,9 +73,9 @@ func setupTestRouter(handler *AuthHandler) *gin.Engine {
 }
 
 // Helper: generate a valid test JWT token
-func generateTestToken(userID, username, role string, scopes []string, secret string) string {
+func generateTestToken(userID, Email, role string, scopes []string, secret string) string {
 	cfg := sharedjwt.TokenConfig{Secret: secret, AccessTokenDuration: 15 * time.Minute, RefreshTokenDuration: 7 * 24 * time.Hour}
-	token, _, _ := sharedjwt.GenerateAccessToken(cfg, userID, username, role, scopes)
+	token, _, _ := sharedjwt.GenerateAccessToken(cfg, userID, Email, role, scopes)
 	return token
 }
 
@@ -83,12 +83,12 @@ func generateTestToken(userID, username, role string, scopes []string, secret st
 
 func TestRegisterHandler_ValidBody(t *testing.T) {
 	mock := &mockAuthService{
-		registerResult: &dto.UserResponse{ID: uuid.New(), Username: "newuser", Email: "new@test.com", Role: "viewer"},
+		registerResult: &dto.UserResponse{ID: uuid.New(), Email: "new@test.com", Role: "viewer"},
 	}
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
+	body := `{"Email":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -104,7 +104,7 @@ func TestRegisterHandler_InvalidBody(t *testing.T) {
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":""}`
+	body := `{"Email":""}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -117,12 +117,12 @@ func TestRegisterHandler_InvalidBody(t *testing.T) {
 
 func TestRegisterHandler_ConflictError(t *testing.T) {
 	mock := &mockAuthService{
-		registerErr: service.ErrDuplicateUsername,
+		registerErr: service.ErrDuplicateEmail,
 	}
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
+	body := `{"Email":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -138,7 +138,7 @@ func TestRegisterHandler_DuplicateEmailConflict(t *testing.T) {
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
+	body := `{"Email":"newuser","email":"new@test.com","password":"password123","full_name":"New User"}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/register", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -158,7 +158,7 @@ func TestLoginHandler_ValidCredentials(t *testing.T) {
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":"admin","password":"password123"}`
+	body := `{"Email":"admin","password":"password123"}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -179,7 +179,7 @@ func TestLoginHandler_MissingFields(t *testing.T) {
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":"admin"}`
+	body := `{"Email":"admin"}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -195,7 +195,7 @@ func TestLoginHandler_InvalidCredentials(t *testing.T) {
 	handler := NewAuthHandler(mock, "test-secret")
 	router := setupTestRouter(handler)
 
-	body := `{"username":"admin","password":"wrong"}`
+	body := `{"Email":"admin","password":"wrong"}`
 	req, _ := http.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -221,7 +221,7 @@ func TestLoginHandler_InactiveAndTooManyAttempts(t *testing.T) {
 			handler := NewAuthHandler(mock, "test-secret")
 			router := setupTestRouter(handler)
 
-			body := `{"username":"admin","password":"password123"}`
+			body := `{"Email":"admin","password":"password123"}`
 			req, _ := http.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
@@ -354,7 +354,7 @@ func TestLogoutHandler_ServiceError(t *testing.T) {
 
 func TestGetProfileHandler_Success(t *testing.T) {
 	mock := &mockAuthService{
-		profileResult: &dto.UserResponse{ID: uuid.New(), Username: "testuser", Email: "test@test.com", Role: "admin", Scopes: []string{"server:read"}},
+		profileResult: &dto.UserResponse{ID: uuid.New(), Email: "test@test.com", Role: "admin", Scopes: []string{"server:read"}},
 	}
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
@@ -443,14 +443,14 @@ func TestListUsersHandler_Success(t *testing.T) {
 			PageSize:   20,
 			TotalPages: 1,
 			Items: []dto.UserResponse{
-				{ID: uuid.New(), Username: "viewer01", Email: "viewer@test.com", Role: "viewer", Scopes: []string{"server:read"}},
+				{ID: uuid.New(), Email: "viewer@test.com", Role: "viewer", Scopes: []string{"server:read"}},
 			},
 		},
 	}
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("GET", "/api/v1/auth/users?page=1&page_size=20", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -468,7 +468,7 @@ func TestListUsersHandler_NormalizesPagination(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("GET", "/api/v1/auth/users?page=-5&page_size=500", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -484,7 +484,7 @@ func TestListUsersHandler_ServiceError(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("GET", "/api/v1/auth/users", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -528,12 +528,12 @@ func TestListUsersHandler_MissingUserManageScope(t *testing.T) {
 func TestUpdateUserRoleHandler_Success(t *testing.T) {
 	targetID := uuid.New()
 	mock := &mockAuthService{
-		updateRoleResult: &dto.UserResponse{ID: targetID, Username: "operator01", Email: "operator@test.com", Role: "operator", Scopes: []string{"server:read", "server:update"}},
+		updateRoleResult: &dto.UserResponse{ID: targetID, Email: "operator@test.com", Role: "operator", Scopes: []string{"server:read", "server:update"}},
 	}
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"operator"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -569,7 +569,7 @@ func TestUpdateUserRoleHandler_InvalidCurrentUserID(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("not-a-uuid", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("not-a-uuid", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"admin"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -587,7 +587,7 @@ func TestUpdateUserRoleHandler_CannotChangeOwnRole(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken(targetID.String(), "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken(targetID.String(), "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"viewer"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -604,7 +604,7 @@ func TestUpdateUserRoleHandler_InvalidUserID(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/not-a-uuid/role", bytes.NewBufferString(`{"role_name":"operator"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -622,7 +622,7 @@ func TestUpdateUserRoleHandler_InvalidBody(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -640,7 +640,7 @@ func TestUpdateUserRoleHandler_RoleNotFound(t *testing.T) {
 	handler := NewAuthHandler(mock, "my-32-byte-secret-key-for-testing!")
 	router := setupTestRouter(handler)
 
-	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:manage"}, "my-32-byte-secret-key-for-testing!")
+	token := generateTestToken("550e8400-e29b-41d4-a716-446655440000", "admin", "admin", []string{"user:list", "user:manage_role"}, "my-32-byte-secret-key-for-testing!")
 	req, _ := http.NewRequest("PUT", "/api/v1/auth/users/"+targetID.String()+"/role", bytes.NewBufferString(`{"role_name":"viewer"}`))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
