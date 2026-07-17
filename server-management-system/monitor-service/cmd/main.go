@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vcs-sms/monitor-service/config"
 	"github.com/vcs-sms/monitor-service/internal/database"
 	"github.com/vcs-sms/monitor-service/internal/monitor"
@@ -34,7 +36,7 @@ func main() {
 		log.Fatal().Err(err).Msg("Invalid monitor configuration")
 	}
 
-	rdb := database.ConnectRedis(cfg.Redis)
+	rdb := database.ConnectRedis(cfg.Redis, cfg.Monitor.WorkerCount)
 
 	esClient, err := database.ConnectES(database.ESConfig{
 		Addresses:   cfg.ES.Addresses,
@@ -52,23 +54,28 @@ func main() {
 	}
 	cancelTemplate()
 
+	registry := prometheus.NewRegistry()
+	metrics := monitor.NewMetrics(registry)
+
 	ops := monitor.NewRedisOps(rdb)
 	writer := repository.NewFactWriter(esClient, cfg.ES.IndexPrefix)
-	facts := monitor.NewFactBuffer(writer, cfg.Monitor.FactCapacity, log)
+	facts := monitor.NewFactBuffer(writer, cfg.Monitor.FactCapacity, metrics, log)
 	pinger := monitor.NewTCPPinger(
 		time.Duration(cfg.Monitor.TCPTimeout)*time.Millisecond, cfg.Monitor.TCPDialHost)
 
-	scheduler := monitor.NewScheduler(ops, log)
-	pool := monitor.NewPool(ops, pinger, facts, cfg.Monitor.WorkerCount, log)
+	scheduler := monitor.NewScheduler(ops, metrics, log)
+	pool := monitor.NewPool(ops, pinger, facts, metrics, cfg.Monitor.WorkerCount, log)
+	sampler := monitor.NewSampler(ops, metrics)
 
 	// The scheduler competes for the round lock; the pool pings whether or not
 	// this instance wins, so every instance adds ping capacity.
 	runCtx, stopRun := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() { defer wg.Done(); scheduler.Run(runCtx) }()
 	go func() { defer wg.Done(); pool.Run(runCtx) }()
 	go func() { defer wg.Done(); facts.Run(runCtx) }()
+	go func() { defer wg.Done(); sampler.Run(runCtx) }()
 
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -78,6 +85,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
+	r.GET("/metrics", gin.WrapH(promhttp.HandlerFor(registry, promhttp.HandlerOpts{})))
 
 	addr := fmt.Sprintf(":%s", cfg.App.Port)
 	srv := &http.Server{Addr: addr, Handler: r}

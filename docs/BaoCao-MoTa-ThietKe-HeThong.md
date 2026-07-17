@@ -1,11 +1,16 @@
 # BÁO CÁO MÔ TẢ VÀ THIẾT KẾ HỆ THỐNG
 ## VCS Server Management System (VCS-SMS)
 
-> **Chương trình:** VCS Passport — Checkpoint 1
-> **Phiên bản:** 1.0
-> **Ngày:** 2026-06-19
-> **Ngôn ngữ lập trình:** Go 1.24+
-> **Kiến trúc:** Microservices + API Gateway + Event-Driven (Kafka)
+> **Chương trình:** VCS Passport
+> **Phiên bản:** 2.0 — thiết kế sau refactor
+> **Ngày:** 2026-07-17
+> **Ngôn ngữ:** Go 1.24+ (service dùng Go 1.25)
+> **Kiến trúc:** 4 microservice + Traefik ForwardAuth + Redis Stream + database-per-service
+
+> **Ghi chú phiên bản:** Bản 1.0 (Checkpoint 1, 2026-06-19) mô tả kiến trúc cũ —
+> 5 service + API Gateway tự viết + Kafka + shared schema — và vẫn nằm trong lịch sử
+> git. Tài liệu này mô tả hệ thống **hiện tại**. Đặc tả đầy đủ ở `design.md`, đối chiếu
+> chi tiết cũ↔mới ở `refactor.md`.
 
 ---
 
@@ -13,15 +18,15 @@
 
 1. [Tổng quan dự án](#1-tổng-quan-dự-án)
 2. [Phân tích yêu cầu](#2-phân-tích-yêu-cầu)
-3. [Kiến trúc tổng quan hệ thống](#3-kiến-trúc-tổng-quan-hệ-thống)
+3. [Kiến trúc tổng quan](#3-kiến-trúc-tổng-quan)
 4. [Thiết kế cơ sở dữ liệu](#4-thiết-kế-cơ-sở-dữ-liệu)
-5. [Kiến trúc Event-Driven (Kafka)](#5-kiến-trúc-event-driven-kafka)
-6. [Thiết kế bảo mật — JWT & RBAC](#6-thiết-kế-bảo-mật--jwt--rbac)
+5. [Event-driven với Redis Stream](#5-event-driven-với-redis-stream)
+6. [Bảo mật — JWT, ForwardAuth, RBAC](#6-bảo-mật--jwt-forwardauth-rbac)
 7. [Thiết kế API](#7-thiết-kế-api)
 8. [Các luồng nghiệp vụ chính](#8-các-luồng-nghiệp-vụ-chính)
-9. [Chiến lược Caching (Redis)](#9-chiến-lược-caching-redis)
+9. [Caching](#9-caching)
 10. [Logging & Observability](#10-logging--observability)
-11. [Chiến lược kiểm thử (Testing)](#11-chiến-lược-kiểm-thử-testing)
+11. [Kiểm thử](#11-kiểm-thử)
 12. [Triển khai & vận hành](#12-triển-khai--vận-hành)
 13. [Công nghệ sử dụng](#13-công-nghệ-sử-dụng)
 14. [Tổng kết](#14-tổng-kết)
@@ -32,28 +37,38 @@
 
 ### 1.1. Bài toán
 
-Công ty VCS hiện đang quản lý khoảng **10.000 server**. Dự án **VCS-SMS** xây dựng một hệ thống quản lý tập trung cho toàn bộ danh sách server này, với các nhóm chức năng:
+Quản lý và giám sát **10.000 server**: CRUD, import/export Excel, health check định kỳ,
+báo cáo uptime và gửi email hằng ngày.
 
-- **Theo dõi trạng thái On/Off** theo thời gian thực bằng cơ chế TCP Health Check định kỳ mỗi 60 giây.
-- **Quản lý danh sách server (CRUD)** với hỗ trợ filter, sort, pagination.
-- **Import/Export** danh sách server qua file Excel (`.xlsx`).
-- **Báo cáo uptime** định kỳ hàng ngày qua Email + API báo cáo chủ động theo khoảng thời gian.
-- **Xác thực & phân quyền người dùng** theo 3 vai trò: Admin, Operator, Viewer.
+### 1.2. Định nghĩa trạng thái
 
-### 1.2. Định nghĩa trạng thái On/Off
+| Trạng thái | Ý nghĩa |
+|---|---|
+| `ON` | TCP connect tới `ipv4:tcp_port` thành công |
+| `OFF` | TCP connect thất bại (timeout / refused / ...) |
+| `UNKNOWN` | Chưa từng được check |
 
-Một server được coi là **ON** nếu Monitor Service thực hiện kết nối **TCP** thành công tới cổng tương ứng của server trong khoảng timeout 5 giây; ngược lại (connection refused / timeout) được coi là **OFF**. Đây là cách định nghĩa sát với thực tế giám sát hạ tầng (TCP reachability) và cho phép đo cả độ trễ phản hồi (latency).
+`UNKNOWN` là giá trị hợp lệ của cột, nhưng **không bao giờ** là transition hợp lệ trên
+stream — event chỉ mang `ON` hoặc `OFF`.
 
-### 1.3. Các quyết định thiết kế quan trọng
+### 1.3. Năm quyết định định hình hệ thống
 
-| # | Vấn đề | Quyết định | Lý do |
-|:-:|--------|-----------|-------|
-| 1 | Phương pháp Health-check | **TCP Simulator Pool** | Một service Go (`tcp-simulator`) quản lý 10.000 TCP listeners, mở/đóng port động theo công thức toán học. Monitor Service dùng TCP Connect thật (`net.DialTimeout`) — chạy y hệt production. |
-| 2 | API Gateway | **Tự viết bằng Gin** | Toàn quyền kiểm soát JWT Middleware, Rate Limiting, Scope, Reverse Proxy; không phụ thuộc Kong/Traefik. |
-| 3 | Email Provider | **Gmail SMTP + App Password** | Gửi email thật, cấu hình qua `.env`, đủ quota cho demo. |
-| 4 | Cấu trúc repo | **Monorepo** | Quản lý tập trung, chia sẻ `shared/` dễ dàng, 1 `docker-compose.yml` dựng toàn bộ. |
-| 5 | Chiến lược DB | **Shared Instance, Separate Schemas** | 1 Postgres vật lý, mỗi service 1 schema riêng + DB user riêng. Loose coupling + nhẹ tài nguyên. |
-| 6 | Quy trình phát triển | **Design First** | Hoàn thiện DB Schema → OpenAPI Spec → Sequence Diagrams → Code. |
+| # | Quyết định | Lý do |
+|---|---|---|
+| 1 | **Database-per-service** | Ranh giới service được cưỡng chế bằng quyền DB, không phải bằng quy ước |
+| 2 | **Redis Stream thay Kafka** | 1 event, 1 producer, 1 consumer group, vài chục event/ngày — Kafka là chi phí không đổi lấy được gì |
+| 3 | **Traefik ForwardAuth thay Gateway tự viết** | Không tự viết lại routing / rate-limit / TLS |
+| 4 | **Round-based monitoring** | `round_id` từ Redis TIME cho nhiều instance thống nhất mà không cần điều phối |
+| 5 | **Snapshot 00:30 thay aggregate on-demand** | Report đọc bảng đã cô đọng → ES chết không làm chết report |
+
+### 1.4. Luận điểm trung tâm
+
+> Monitoring ping 10.000 server mỗi phút, nhưng **chỉ phát event khi status thực sự
+> đổi** — vài chục lần/ngày. Nhờ vậy `server:list:version` gần như đứng yên và cache
+> có tỉ lệ hit rất cao.
+
+Ở thiết kế cũ, mỗi lần check là một event → cache bị vô hiệu liên tục → cache vô dụng.
+Toàn bộ giá trị của Redis Stream + Lua script nằm ở chỗ này.
 
 ---
 
@@ -61,517 +76,479 @@ Một server được coi là **ON** nếu Monitor Service thực hiện kết n
 
 ### 2.1. Yêu cầu chức năng
 
-| Nhóm | Chức năng | Điểm | Hiện thực |
-|------|-----------|:----:|-----------|
-| **Health Check** | Kiểm tra trạng thái server định kỳ | 2.0 | Worker Pool 100 goroutines + TCP Simulator 10K port |
-| **CRUD** | Tạo server | 0.25 | `POST /api/v1/servers` |
-| | Xem server (filter, sort, pagination) | 0.25 | `GET /api/v1/servers` |
-| | Cập nhật server (không cho sửa `server_id`) | 0.25 | `PUT /api/v1/servers/{server_id}` |
-| | Xóa server | 0.25 | `DELETE /api/v1/servers/{server_id}` (soft delete) |
-| **Excel** | Import từ Excel (bỏ qua trùng) | 0.5 | `POST /api/v1/servers/import` (bất đồng bộ qua Kafka) |
-| | Export ra Excel | 0.5 | `POST /api/v1/servers/export` |
-| **Báo cáo** | Báo cáo định kỳ qua Email | 0.5 | Cron 8:00 AM + HTML email |
-| | API báo cáo chủ động | 0.5 | `POST /api/v1/reports` |
+| Nhóm | Chức năng |
+|---|---|
+| Server | Create, List (filter/sort/paginate), View, Update, Delete (soft) |
+| Excel | Import (báo cáo 3 nhóm kết quả), Export (chống formula injection) |
+| Monitoring | Health check 10.000 server mỗi 60s |
+| Report | Uptime theo kỳ, ON/OFF cuối kỳ, top 10 uptime thấp nhất, coverage |
+| Email | Gửi report on-demand + tự động hằng ngày |
+| Identity | Login, JWT, refresh, logout, RBAC theo scope |
 
 ### 2.2. Yêu cầu phi chức năng
 
-| Yêu cầu | Điểm | Giải pháp |
-|---------|:----:|-----------|
-| OpenAPI | 0.5 | OpenAPI 3.0.3 (`api-spec.yaml`) + Swagger UI tại Gateway |
-| Unit Test ≥ 90% coverage | 0.5 | Toàn bộ core business packages của 7 service đạt ≥ 90% |
-| Chống SQL Injection | 0.5 | GORM parameterized queries (không raw SQL) |
-| Error handling rõ ràng (mã + mô tả) | 0.5 | 17 mã lỗi định nghĩa sẵn + format response chuẩn |
-| Log ra file + logrotate | 0.5 | zerolog (JSON) + lumberjack rotation |
-| JWT Authentication + Scope per API | 0.5 | JWT HS256 + RBAC 10 scopes tại Gateway |
-| Elasticsearch tính Uptime | 1.0 | Bulk index + aggregation query |
-| PostgreSQL | — | PostgreSQL 17, 5 schemas |
-| Redis Cache | 0.5 | Cache-aside + rate limit + distributed lock + blacklist |
-| Công nghệ khác | 0.5 | Kafka, Docker Compose, TCP Simulator, Next.js Frontend |
+| Yêu cầu | Giải pháp hiện tại |
+|---|---|
+| OpenAPI | OpenAPI 3.0.3 (`docs/api-spec.yaml`) |
+| Unit test | **406 test**, 6/6 module `build` + `vet` + `test` xanh |
+| Chống SQL Injection | GORM parameterized; raw SQL chỉ ở các truy vấn aggregate và đều bind tham số |
+| Error handling | Mã lỗi + mô tả, format response chuẩn |
+| Log ra file + rotate | zerolog (JSON) + lumberjack |
+| JWT + scope per API | ForwardAuth (authn) + `RequireScope` trong service (authz) |
+| Elasticsearch tính uptime | Composite aggregation lúc 00:30 → `daily_snapshots` |
+| PostgreSQL | PostgreSQL 16, **3 database tách rời** |
+| Redis | Cache-aside, target projection, round queue, status, stream, bộ đếm uptime luỹ kế |
+| Metrics | 7 metric Prometheus tại `/metrics` của monitor |
 
-### 2.3. Thông tin cơ bản của một Server
+### 2.3. Thông tin một Server
 
-| Trường | Kiểu | Mô tả |
-|--------|------|-------|
-| `server_id` | VARCHAR(100), UNIQUE | Mã định danh (không trùng, **không sửa được**) |
-| `server_name` | VARCHAR(255), UNIQUE | Tên server (không trùng) |
-| `ipv4` | VARCHAR(45) | Địa chỉ IPv4 |
-| `status` | VARCHAR(20) | Trạng thái `on`/`off` (mặc định `off`) |
-| `created_at` / `updated_at` | TIMESTAMPTZ | Thời gian tạo / cập nhật cuối |
-| `os`, `cpu_cores`, `ram_gb`, `disk_gb`, `location`, `description` | — | Thông tin mở rộng tự định nghĩa |
+| Trường | Kiểu | Ghi chú |
+|---|---|---|
+| `server_id` | VARCHAR(100) | Unique **toàn cục kể cả row đã xóa**; không sửa được |
+| `server_name` | VARCHAR(255) | Unique **trên server đang sống** |
+| `ipv4` | INET | Phải nằm trong CIDR allowlist |
+| `tcp_port` | INT | 1–65535 |
+| `status` | VARCHAR(20) | `ON`/`OFF`/`UNKNOWN`, mặc định `UNKNOWN`; **client không set được** |
+| `status_version` | BIGINT | Version guard chống event cũ/trùng |
+| `cpu_cores`, `ram_gb`, `disk_gb` | INT NULL | `NULL` hoặc `> 0`; map sang `*int` trong Go |
+| `os`, `location`, `description` | — | Tùy chọn |
+| `created_at`, `updated_at`, `deleted_at` | TIMESTAMPTZ | `deleted_at` = soft delete |
 
 ---
 
-## 3. Kiến trúc tổng quan hệ thống
+## 3. Kiến trúc tổng quan
 
-### 3.1. Sơ đồ kiến trúc
+### 3.1. Sơ đồ
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        CLIENT LAYER                               │
-│        Web UI (Next.js) / Postman / cURL / Swagger UI             │
-└───────────────────────────┬──────────────────────────────────────┘
-                            │ HTTP :8080
-                    ┌───────▼────────┐
-                    │  API GATEWAY   │  Gin Framework
-                    │  Port: 8080    │  • JWT Validation
-                    │                │  • Scope RBAC (10 scopes)
-                    │                │  • Rate Limiting (Redis)
-                    │                │  • Reverse Proxy
-                    └───┬───┬───┬───┬┘
-                        │   │   │   │
-        ┌───────────────┼───┼───┼───┼───────────────┐
-        ▼               ▼   ▼   ▼   ▼               ▼
-┌──────────┐  ┌──────────┐ ┌──────────┐ ┌──────────────┐
-│  AUTH    │  │  SERVER  │ │ MONITOR  │ │   REPORT     │
-│  :8081   │  │  :8082   │ │  :8083   │ │   :8084      │
-│ Register │  │ CRUD     │ │ Health-  │ │ Uptime       │
-│ Login    │  │ Filter   │ │ Check    │ │ Summary      │
-│ JWT      │  │ Sort     │ │ 60s cron │ │ Email (SMTP) │
-│ Refresh  │  │ Paginate │ │ Worker   │ │ Daily Cron   │
-│ Logout   │  │ Cache    │ │ Pool     │ │ HTML Template│
-│ Profile  │  │ Events   │ │ ES Bulk  │ │ Snapshots    │
-└────┬─────┘  └────┬─────┘ └────┬─────┘ └──────┬───────┘
-     └─────────────┴────────────┴───────────────┘
-┌──────────────────────────────────────────────────────┐
-│                 FILE I/O SERVICE  (:8085)            │
-│   Import Excel (async Kafka) + Export Excel (sync)   │
-└────────────────────────┬─────────────────────────────┘
-                         ▼
-              ┌──────────────────┐
-              │  TCP SIMULATOR   │  Ports 9001–19000
-              │  10K Listeners   │  Math Engine (On/Off động)
-              └──────────────────┘
-
-Hạ tầng dùng chung: PostgreSQL 17 | Redis 8 | Elasticsearch 8.12 | Kafka 3.9
+```text
+                       Web (Next.js) :3000
+                              │
+                              ▼
+                       Traefik :8080
+                              │
+              ┌───────ForwardAuth────────► auth-service /internal/verify
+              │
+   ┌──────────┼──────────────────┬─────────────────────┐
+   ▼          ▼                  ▼                     ▼
+/auth      /servers          /reports            (không public)
+auth-svc   server-svc        report-svc          monitor-svc
+   │           │                  │                     │
+identity_db  server_db        report_db                 │
+               │                  │                     │
+               │                  └── GET /internal/servers (population)
+               │                                        │
+               └──── Redis ────────────────────────────┘
+                     target projection / status / stream / cache
+                                                        │
+                                                Elasticsearch
+                                                (health fact, ILM 7 ngày)
 ```
 
-### 3.2. Vì sao chọn kiến trúc Microservices?
+### 3.2. Vì sao Microservices
 
-Với hệ thống quản lý 10.000 server, tải trọng (workload) của các chức năng rất khác nhau:
+Bốn service có **nhịp thay đổi và hồ sơ tải khác hẳn nhau**:
 
-- **Monitor Service**: hoạt động liên tục, mỗi phút quét 10.000 server — chịu tải CPU và Network I/O nặng nhất.
-- **TCP Simulator**: service hạ tầng hỗ trợ, quản lý 10.000 TCP listeners, mở/đóng port động.
-- **Server Service (CRUD)**: tải thấp, thỉnh thoảng mới có thao tác CRUD từ người dùng.
-- **Report & File I/O**: tải bất chợt (spiky), cần nhiều RAM để parse/gen Excel hoặc gom dữ liệu lớn.
+- monitor-service: 10.000 ping/phút, không có DB, cần scale ngang
+- server-service: CRUD, tải theo người dùng
+- report-service: một job nặng lúc 00:30, còn lại gần như rảnh
+- auth-service: tải thấp nhưng nằm trên đường đi của **mọi** request
 
-**Lợi ích:**
+Nhốt chúng vào một process nghĩa là phải scale tất cả theo cái nặng nhất.
 
-| Lợi ích | Mô tả |
-|---------|-------|
-| **Mở rộng độc lập** | Khi số server tăng lên 50.000, chỉ cần scale Monitor Service và TCP Simulator, không lãng phí tài nguyên cho Auth/File I/O. |
-| **Cô lập lỗi** | Import Excel bị OOM chỉ làm sập File I/O Service; Monitor Service vẫn ping server bình thường. |
-| **Bảo mật** | Auth Service chứa logic mật khẩu nhạy cảm được bảo vệ riêng; service khác không biết cấu trúc bảng Users. |
+### 3.3. Ranh giới service
 
-### 3.3. Chiến lược Monorepo
+| Service | Sở hữu | Không được đụng |
+|---|---|---|
+| auth-service | `identity_db` | server_db, report_db |
+| server-service | `server_db`, target projection, `server:list:*` | identity_db, report_db |
+| monitor-service | `monitor:*`, `stream:monitor.status`, ES index | Mọi PostgreSQL |
+| report-service | `report_db` | server_db (phải gọi `/internal/servers`) |
 
-Toàn bộ 7 service nằm trong cùng một Git Repository:
-- **Quản lý phiên bản thống nhất**: tránh xung đột phiên bản thư viện giữa các service.
-- **Thư mục `shared/`**: chia sẻ cấu trúc dữ liệu chung (Errors, Logger, Kafka Interface, JWT, Response) — không cần publish package riêng.
-- **Triển khai dễ dàng**: 1 file `docker-compose.yml` duy nhất dựng toàn bộ hệ thống.
+**monitor-service không có PostgreSQL.** Đó là lý do nó scale ngang tự do.
 
-### 3.4. API Gateway — tự viết bằng Gin
+### 3.4. Traefik thay vì Gateway tự viết
 
-API Gateway đóng vai trò "điều phối viên" đứng trước 5 microservices và thực thi chuỗi middleware:
+Gateway tự viết phải tự làm routing, rate limit, TLS, health check, retry — toàn bộ là
+code phải bảo trì mà không phải giá trị nghiệp vụ. Traefik làm sẵn, và ForwardAuth cho
+phép giữ nguyên logic xác thực trong auth-service.
 
-```
-Request → Recovery → Logger → CORS → Rate Limiter (Redis) → JWT Auth → Scope Check → Reverse Proxy → Response
-```
+Traefik **không** làm authorization: nó không biết endpoint nào cần scope nào. Việc đó
+nằm trong service — xem §6.
 
-1. **Entry point duy nhất**: client chỉ gọi vào port 8080; Gateway route tới đúng service (`/api/v1/auth/*` → Auth, `/api/v1/servers/*` → Server/FileIO, …).
-2. **Xác thực tập trung**: parse JWT, kiểm tra hợp lệ, lấy `user_id` + `scopes`, inject vào HTTP Header `X-User-ID`, `X-User-Scopes` trước khi forward.
-3. **Rate Limiting**: dùng Redis giới hạn 100 requests/phút/IP.
-4. **Log tập trung**: sinh `request_id` duy nhất, ghi log thời gian xử lý cho toàn hệ thống.
+### 3.5. Monorepo
 
-### 3.5. Ranh giới các service (Service Boundaries)
-
-| Service | Schema | Bảng | Phụ thuộc |
-|---------|--------|------|-----------|
-| **API Gateway** | — | — | Redis |
-| **Auth Service** | `auth_schema` | `users`, `roles`, `role_permissions` | PostgreSQL, Redis |
-| **Server Service** | `server_schema` | `servers` | PostgreSQL, Redis, Kafka |
-| **Monitor Service** | `monitor_schema` | `health_check_configs` | PostgreSQL, Redis, Kafka, Elasticsearch, TCP Simulator |
-| **Report Service** | `report_schema` | `report_jobs`, `daily_snapshots` | PostgreSQL, Elasticsearch, Kafka, SMTP |
-| **File I/O Service** | `fileio_schema` | `import_jobs`, `import_job_details` | PostgreSQL (cross-schema), Kafka |
-| **TCP Simulator** | — | — | Standalone |
+Sáu Go module trong một repo: `shared` (logger, middleware, response, JWT) + 4 service
++ `tcp-simulator`. Đổi contract chung chỉ cần một commit.
 
 ---
 
 ## 4. Thiết kế cơ sở dữ liệu
 
-### 4.1. Chiến lược: Shared Instance, Separate Schemas
+### 4.1. Chiến lược: database-per-service
 
-Hệ thống dùng **PostgreSQL 17** với **1 Database vật lý duy nhất** (`vcs_sms`), bên trong tạo **5 Schemas logic** riêng biệt:
+| Database | Owner | DB user |
+|---|---|---|
+| `identity_db` | auth-service | `identity_user` |
+| `server_db` | server-service | `server_user_v2` |
+| `report_db` | report-service | `report_user_v2` |
 
-```
-PostgreSQL 17 (vcs_sms)
-├── auth_schema          ← Auth Service (full ownership)
-│   ├── roles
-│   ├── role_permissions
-│   └── users
-├── server_schema        ← Server Service (full ownership)
-│   └── servers          ← Monitor, FileIO, Report READ (GRANT SELECT)
-├── monitor_schema       ← Monitor Service (full ownership)
-│   └── health_check_configs
-├── report_schema        ← Report Service (full ownership)
-│   ├── report_jobs
-│   └── daily_snapshots
-└── fileio_schema        ← File I/O Service (full ownership)
-    ├── import_jobs
-    └── import_job_details
-```
-
-**Lý do chọn chiến lược này:**
-
-1. **Đạt ranh giới Microservice ở cấp quyền hạn**: mỗi service có DB user riêng, chỉ có quyền trên schema của mình. Nếu lập trình viên vô tình viết query từ `report-service` `DELETE FROM auth_schema.users`, PostgreSQL chặn ngay (Permission Denied).
-2. **Nhẹ tài nguyên**: chạy 5 Postgres database riêng tốn nhiều RAM/CPU overhead (background workers, shared memory). Shared Instance tối ưu khi chạy Docker trên máy local.
-3. **Giải quyết Cross-Schema Read**: `monitor-service` cần danh sách 10.000 server IP để ping. Thay vì gọi HTTP API (chậm, phụ thuộc), ta `GRANT SELECT` trên `server_schema.servers` cho `monitor_user` — query tốc độ nội bộ DB. Chỉ cấp quyền ĐỌC; quyền GHI vẫn độc quyền của `server-service` → giữ Data Integrity.
-
-**Cross-schema GRANTs:**
-
-| DB User | Quyền trên `server_schema.servers` |
-|---------|-----------------------------------|
-| `monitor_user` | SELECT |
-| `fileio_user` | SELECT, INSERT |
-| `report_user` | SELECT |
+Không service nào có credential của DB service khác. Schema chung cho phép `JOIN`
+xuyên ranh giới; một khi chuyện đó xảy ra, đổi schema của B là làm gãy A. Tách
+database làm điều đó **không thể**, chứ không phải "không nên".
 
 ### 4.2. Các bảng chính
 
-#### `server_schema.servers`
+**`servers`** (server_db)
 
-| Column | Type | Constraint |
-|--------|------|------------|
-| `id` | UUID | PK, DEFAULT `gen_random_uuid()` |
-| `server_id` | VARCHAR(100) | UNIQUE, NOT NULL |
-| `server_name` | VARCHAR(255) | UNIQUE, NOT NULL |
-| `ipv4` | VARCHAR(45) | NOT NULL |
-| `status` | VARCHAR(20) | DEFAULT `'off'` |
-| `os` | VARCHAR(100) | |
-| `cpu_cores` | INTEGER | |
-| `ram_gb` / `disk_gb` | NUMERIC | |
-| `location` | VARCHAR(255) | |
-| `description` | TEXT | |
-| `created_at`, `updated_at`, `deleted_at` | TIMESTAMPTZ | Soft delete |
+```sql
+server_id      VARCHAR(100) NOT NULL
+status         VARCHAR(20)  CHECK (status IN ('ON','OFF','UNKNOWN'))
+status_version BIGINT       NOT NULL DEFAULT 0
+ipv4           INET         NOT NULL
+cpu_cores      INT          CHECK (cpu_cores IS NULL OR cpu_cores > 0)
+deleted_at     TIMESTAMPTZ
 
-**Indexes:** `server_id`, `server_name`, `ipv4`, `status`, `location`, `os`.
+CREATE UNIQUE INDEX ux_servers_server_id   ON servers (server_id);
+CREATE UNIQUE INDEX ux_servers_active_name ON servers (server_name)
+    WHERE deleted_at IS NULL;
+```
 
-#### `auth_schema.users`
+**`daily_snapshots`** (report_db) — PK `(server_id, date)`
 
-| Column | Type | Constraint |
-|--------|------|------------|
-| `id` | UUID | PK |
-| `username` | VARCHAR(100) | UNIQUE |
-| `email` | VARCHAR(255) | UNIQUE |
-| `password_hash` | VARCHAR(255) | bcrypt cost 12 |
-| `full_name` | VARCHAR(255) | |
-| `role_id` | UUID | FK → roles |
-| `is_active` | BOOLEAN | DEFAULT TRUE |
-| `last_login_at` | TIMESTAMPTZ | |
-| `deleted_at` | TIMESTAMPTZ | Soft delete |
+`uptime_pct` **NULL khi `actual_checks = 0`**: server không ai đo được có uptime *không
+xác định*, không phải 0%. NULL giữ nó ngoài `AVG()` và đưa vào `servers_no_data`.
 
-#### Các bảng khác
-- **`auth_schema.roles` & `role_permissions`**: 3 roles mặc định (`admin`, `operator`, `viewer`); mapping role → scope (many-to-many).
-- **`fileio_schema.import_jobs` & `import_job_details`**: theo dõi tiến trình import (`pending → processing → completed/failed`) và chi tiết từng dòng (success/failed + lý do).
-- **`report_schema.report_jobs` & `daily_snapshots`**: theo dõi yêu cầu gửi báo cáo và lưu snapshot uptime hàng ngày (tránh tính lại từ Elasticsearch).
-- **`monitor_schema.health_check_configs`**: cấu hình health-check cho mỗi server (port TCP tương ứng).
+**`api_idempotency`** (server_db) — PK `(actor_id, endpoint, idempotency_key)`
 
-> Sơ đồ ERD chi tiết từng schema xem trong thư mục `docs/DB Schema/`.
+**`report_jobs`** (report_db) — state: `processing`/`generated`/`sending`/`sent`/`failed`/`delivery_unknown`
 
-### 4.3. Bổ trợ bằng Redis & Elasticsearch
+### 4.3. Redis & Elasticsearch
 
-| Công nghệ | Phiên bản | Mục đích |
-|-----------|:---------:|----------|
-| **Redis** | 8 | Rate Limiting, Distributed Lock, JWT Blacklist, Caching API |
-| **Elasticsearch** | 8.12 | Lưu log health-check (time-series). Mỗi phút 10.000 bản ghi (~14.4 triệu/ngày nếu chạy 24/24), tính uptime aggregation tốc độ mili-giây |
+Redis: target projection (`server:monitor-target:*`), round (`monitor:round:*`,
+`monitor:ping:queue:*`), status (`monitor:status:*`), stream, cache (`server:list:*`).
+Mỗi namespace có **một** owner.
+
+Elasticsearch: `server-status-logs-YYYY.MM.DD`, `_id = {server_id}:{round_id}` tất định
+để retry bulk không nhân bản. Mapping `keyword` do index template cài — để ES tự map
+động thì các field thành `text` và aggregation uptime **âm thầm trả 0**.
+ILM: hot 0–7 ngày → xóa index.
 
 ---
 
-## 5. Kiến trúc Event-Driven (Kafka)
+## 5. Event-driven với Redis Stream
 
-### 5.1. Vì sao cần Kafka thay vì gọi HTTP API trực tiếp?
+### 5.1. Vì sao bỏ Kafka
 
-Ví dụ luồng Import Excel 5.000 server: nếu xử lý đồng bộ trong 1 request HTTP, người dùng phải chờ lâu và rủi ro timeout cao. Với Kafka, `fileio-service` chỉ lưu file, tạo `import_jobs`, bắn event `import.job.created` rồi phản hồi ngay `job_id`; consumer nền xử lý dần.
+| Yếu tố | Con số thật |
+|---|---|
+| Loại event | 1 (`status.changed`) |
+| Producer | 1 |
+| Consumer group | 1 |
+| Tần suất | Vài chục/ngày |
 
-**Lợi ích:**
+Không yếu tố nào cần Kafka; đổi lại phải nuôi broker + KRaft controller + ~1GB RAM.
+Redis đã có sẵn cho cache và projection, và Redis Stream cung cấp đúng thứ cần:
+append-only log, consumer group, ACK, pending list, `XAUTOCLAIM`.
 
-| Lợi ích | Mô tả |
-|---------|-------|
-| **Decoupling** | Producer không cần biết Consumer là ai/có sống không. Consumer sập thì message vẫn nằm an toàn trong Kafka. |
-| **Buffer Spikes** | Khi nhiều người cùng import hàng chục nghìn server, Kafka đệm như hàng đợi, service rút dần xử lý theo sức. |
-| **Eventual Consistency** | Trạng thái hệ thống đồng bộ dần qua dòng sự kiện chung. |
+### 5.2. Lua script atomic
 
-### 5.2. Kafka KRaft Mode
+Tách HSET và XADD thành hai lệnh sẽ tạo khoảnh khắc Redis status và stream mâu thuẫn.
+Gộp vào một script loại bỏ cửa sổ đó. Ba mã trả về: `0` cũ/replay, `1` có transition,
+`2` không đổi (**không** phát event — đây là chỗ cache được cứu).
 
-Sử dụng Apache Kafka 3.9 ở chế độ **KRaft** — loại bỏ hoàn toàn ZooKeeper: hệ thống nhẹ hơn, start/stop nhanh hơn. Node Kafka tự đóng vai trò vừa broker vừa controller (`process.roles=broker,controller`).
+### 5.3. Version guard
 
-### 5.3. Các Topics & Events
+```sql
+UPDATE servers SET status=?, status_version=? WHERE server_id=? AND status_version < ?
+```
 
-| Topic | Partitions | Producer | Consumer | Mục đích |
-|-------|:----------:|----------|----------|----------|
-| `server.created` | 3 | Server, FileIO | Monitor | Tự động thêm cấu hình health-check |
-| `server.updated` | 3 | Server | Monitor | Cập nhật metadata server |
-| `server.deleted` | 3 | Server | Monitor | Gỡ khỏi danh sách health-check |
-| `server.status.changed` | 6 | Monitor | (future Alerting) | Sự kiện chuyển trạng thái On/Off |
-| `server.health.batch` | 3 | Monitor | (future Analytics) | Batch kết quả health-check |
-| `import.job.created` | 3 | FileIO | FileIO (self) | Xử lý import Excel bất đồng bộ |
-| `report.daily.trigger` | 1 | (manual) | Report | Trigger báo cáo hàng ngày |
+`status_version` chính là `round_id`, tăng đơn điệu → mọi apply idempotent → replay cả
+stream là an toàn.
 
-### 5.4. Go Kafka Client: segmentio/kafka-go
+### 5.4. Phục hồi consumer group
 
-Chọn `segmentio/kafka-go` thay vì `IBM/sarama` vì: API đơn giản (`WriteMessages()`/`ReadMessage()`), context-native, ít dependencies (không kéo theo gokrb5), tự động reconnect.
+Boot lần đầu tạo group tại `$`. Khi mất group (`FLUSHDB`, Redis restart không
+persistence, `allkeys-lru` evict), consumer tự phát hiện `NOGROUP` và tạo lại tại
+**`0`** để replay — vì Monitoring chỉ phát event khi status đổi, bỏ qua event cũ sẽ để
+server kẹt trạng thái sai đến tận lần đổi tiếp theo.
 
 ---
 
-## 6. Thiết kế bảo mật — JWT & RBAC
+## 6. Bảo mật — JWT, ForwardAuth, RBAC
 
-### 6.1. JWT Authentication (Stateless)
+### 6.1. Hai tầng
 
-- **Thuật toán:** HS256 (HMAC-SHA256).
-- **Access Token:** TTL 15 phút. **Refresh Token:** TTL 7 ngày, rotation khi dùng.
-- **Payload:** `user_id`, `role`, `scopes[]`, `jti` (JWT ID).
-- Gateway chỉ cần Secret Key để xác minh chữ ký — **không cần truy vấn DB** → không trở thành bottleneck.
+```text
+Traefik ForwardAuth        → "Token có hợp lệ không?"   (authentication)
+RequireScope trong service → "User có quyền không?"     (authorization)
+```
 
-**Refresh Token Flow:** Đăng nhập → nhận `access_token` (15m) + `refresh_token` (7d). Khi access token hết hạn, client tự gửi refresh token lên `/auth/refresh` để nhận cặp token mới — bảo mật cao mà không hy sinh trải nghiệm.
+Bắt buộc cả hai. ForwardAuth không thể biết endpoint nào cần scope nào; nếu service
+không tự kiểm scope thì một token `viewer` hợp lệ sẽ xóa được server.
 
-### 6.2. JWT Blacklist (Logout)
+### 6.2. Chỉ Traefik là lối vào
 
-Vì JWT là stateless, khi logout hệ thống lưu `jti` vào Redis (`auth:blacklist:<jti> = 1`) với TTL bằng thời gian sống còn lại của token. Gateway kiểm tra blacklist trước khi chấp nhận token (< 1ms).
+Service tin các header `X-User-Id` / `X-User-Scopes` vì Traefik **xóa rồi set lại**
+chúng từ response của `/internal/verify`. Điều đó chỉ đúng khi không ai gọi thẳng được
+vào service. Vì vậy trong `docker-compose.yml` bốn service dùng `expose:` chứ **không**
+`ports:` — chỉ Traefik (8080) và web (3000) ra tới host.
 
-### 6.3. RBAC — Roles & Scopes
+auth-service là ngoại lệ: router `/api/v1/auth` không qua ForwardAuth (nếu qua thì
+không ai login được), nên nó **tự validate JWT** và đọc scope từ claims trong token.
 
-| Role | Scopes |
-|------|--------|
-| **Admin** | `server:create`, `server:read`, `server:update`, `server:delete`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send`, `user:manage` |
-| **Operator** | `server:create`, `server:read`, `server:update`, `server:import`, `server:export`, `monitor:view`, `report:view`, `report:send` |
-| **Viewer** | `server:read`, `server:export`, `report:view` |
+### 6.3. RBAC
 
-Mỗi route khai báo scope cần thiết. Gateway đọc mảng `scopes` trong JWT; thiếu scope → HTTP **403 Forbidden**, backend không bao giờ nhận request trái phép. Việc map Role → Scope nằm trong DB (`role_permissions`), tránh hardcode `if role == "admin"` → dễ mở rộng.
+| Role | Scope |
+|---|---|
+| `admin` | Tất cả |
+| `operator` | Viewer + create/update/delete/import/export + `report:send` + `report:view_detail` |
+| `viewer` | `server:list`, `server:view`, `server:stats`, `report:view` |
 
-### 6.4. Các biện pháp bảo mật khác
+13 scope, ánh xạ 1:1 với endpoint — bảng đầy đủ ở [05-security-jwt-rbac.md](./05-security-jwt-rbac.md).
 
-| Biện pháp | Chi tiết |
-|-----------|----------|
-| **SQL Injection** | GORM parameterized queries — không raw SQL |
-| **Brute Force** | Redis-based login attempt counter (khóa 15 phút sau 5 lần thất bại) |
-| **Password** | bcrypt cost factor 12 |
-| **Rate Limiting** | 100 requests/phút per IP tại Gateway |
-| **CORS** | Allowed origins cấu hình qua `.env` |
-| **Security Context Injection** | Gateway inject `X-User-ID`, `X-User-Scopes`; backend chỉ đọc header tĩnh |
+### 6.4. Các chốt khác
+
+| Chốt | Nội dung |
+|---|---|
+| Argon2id | Hash password |
+| Brute-force | Khóa theo **email** trong Redis (đổi IP không né được) + rate limit IP tại Traefik |
+| CIDR allowlist | Không có thì hệ thống thành công cụ quét cổng nội mạng. Rỗng = chặn tất cả |
+| Formula injection | Ô Excel bắt đầu `= + - @ tab CR` → prefix `'` |
+| Idempotency | `POST /servers` và `/servers/import`; cùng key+body → replay, khác body → 409 |
+| SMTP allowlist | `SMTP_RECIPIENT_DOMAINS` rỗng = có thể bị lợi dụng làm mail relay |
 
 ---
 
 ## 7. Thiết kế API
 
-### 7.1. Tổng hợp Endpoints (18 endpoints)
+### 7.1. Endpoint
 
-| # | Method | Path | Service | Scope |
-|:-:|--------|------|---------|-------|
-| 1 | POST | `/api/v1/auth/register` | Auth | Public |
-| 2 | POST | `/api/v1/auth/login` | Auth | Public |
-| 3 | POST | `/api/v1/auth/refresh` | Auth | Public |
-| 4 | POST | `/api/v1/auth/logout` | Auth | Authenticated |
-| 5 | GET | `/api/v1/auth/profile` | Auth | Authenticated |
-| 6 | GET | `/api/v1/auth/users` | Auth | `user:manage` |
-| 7 | PUT | `/api/v1/auth/users/{user_id}/role` | Auth | `user:manage` |
-| 8 | POST | `/api/v1/servers` | Server | `server:create` |
-| 9 | GET | `/api/v1/servers` | Server | `server:read` |
-| 10 | GET | `/api/v1/servers/{server_id}` | Server | `server:read` |
-| 11 | PUT | `/api/v1/servers/{server_id}` | Server | `server:update` |
-| 12 | DELETE | `/api/v1/servers/{server_id}` | Server | `server:delete` |
-| 13 | POST | `/api/v1/servers/import` | FileIO | `server:import` |
-| 14 | GET | `/api/v1/servers/import/{job_id}` | FileIO | `server:import` |
-| 15 | POST | `/api/v1/servers/export` | FileIO | `server:export` |
-| 16 | GET | `/api/v1/monitor/status` | Monitor | `monitor:view` |
-| 17 | GET | `/api/v1/reports/summary` | Report | `report:view` |
-| 18 | POST | `/api/v1/reports` | Report | `report:send` |
+| Method | Path | Scope |
+|---|---|---|
+| POST | `/api/v1/auth/login` | Public |
+| POST | `/api/v1/auth/register` | Public (tắt ở production) |
+| POST | `/api/v1/auth/refresh` | Public + refresh cookie |
+| POST | `/api/v1/auth/logout` | Authenticated |
+| GET | `/api/v1/auth/profile` | Authenticated |
+| GET | `/api/v1/auth/users` | `user:list` |
+| PUT | `/api/v1/auth/users/{id}/role` | `user:manage_role` |
+| POST | `/api/v1/servers` | `server:create` + Idempotency-Key |
+| GET | `/api/v1/servers` | `server:list` |
+| GET | `/api/v1/servers/{id}` | `server:view` |
+| PUT | `/api/v1/servers/{id}` | `server:update` |
+| DELETE | `/api/v1/servers/{id}` | `server:delete` |
+| POST | `/api/v1/servers/import` | `server:import` + Idempotency-Key |
+| POST | `/api/v1/servers/export` | `server:export` |
+| GET | `/api/v1/servers/stats` | `server:stats` |
+| GET | `/api/v1/servers/uptime` | `server:stats` |
+| GET | `/api/v1/reports/summary` | `report:view` |
+| POST | `/api/v1/reports` | `report:send` |
+| GET | `/api/v1/reports/{id}` | `report:view_detail` |
 
-### 7.2. Định dạng Response chuẩn
+Nội bộ (không qua Traefik): `GET /internal/verify`, `GET /internal/servers`,
+`POST /internal/snapshots/{date}`, `GET /metrics`, `GET /health`.
 
-Thành công:
-```json
-{ "status": "success", "code": 200, "message": "...", "data": { } }
-```
+### 7.2. OpenAPI
 
-Lỗi (mã + mô tả rõ ràng):
-```json
-{
-  "status": "error",
-  "code": 42201,
-  "message": "Validation failed",
-  "errors": [
-    {"field": "ipv4", "code": "INVALID_FORMAT", "message": "Invalid IPv4 format"}
-  ],
-  "meta": { "request_id": "req-abc123", "timestamp": "2026-06-12T10:00:00Z" }
-}
-```
-
-**Mã lỗi định nghĩa (17):** 401 (Unauthorized), 403 (Forbidden), 404 (Not Found), 409 (Conflict), 422 (Validation), 429 (Rate Limit), 500 (Internal), …
-
-### 7.3. OpenAPI / Swagger
-
-Toàn bộ API được mô tả bằng **OpenAPI 3.0.3** (`api-spec.yaml`). Swagger UI tích hợp sẵn tại `http://localhost:8080/swagger/index.html`.
+`docs/api-spec.yaml` (OpenAPI 3.0.3). Spec phản ánh đúng code — ví dụ `status` **không**
+phải field client gửi được, và spec không khai báo nó là input.
 
 ---
 
 ## 8. Các luồng nghiệp vụ chính
 
-### 8.1. Health Check 10.000 server (2.0 điểm) — trái tim hệ thống
+### 8.1. Health check 10.000 server — trái tim hệ thống
 
-#### TCP Simulator — giả lập 10.000 server thật
-**Bài toán:** lấy đâu ra 10.000 IP thật để test? Nếu toàn IP ảo → 100% Offline → vô nghĩa.
-**Giải pháp:** TCP Simulator — một chương trình Go quản lý 10.000 TCP listeners:
-- Mỗi server gán 1 port (`SRV-00001 → 9001`, …, `SRV-10000 → 19000`).
-- **Math Engine** mỗi 30 giây tính On/Off dựa trên `uptime_rate` (vd 0.95), biến thiên hàm Sin theo giờ (pattern ngày/đêm) và offset riêng từng server.
-- Server **ON** → mở TCP port; **OFF** → đóng port (connection refused).
-- Monitor Service dùng TCP Connect thật → code chạy y hệt production, chỉ tốn 1 container (~100–256MB RAM).
+```text
+Scheduler (1 instance thắng lock):          SSCAN ids → RPUSH queue → SET current_round
+Worker pool (MỌI instance, 200 goroutine):  BRPOP → TCP connect → Lua → fact → ES
+```
 
-#### Worker Pool Pattern
-Thay vì mở 10.000 luồng, hệ thống tạo cố định **100 goroutines**. Channel `jobs` chứa 10.000 server; 100 worker liên tục lấy server ra ping. Tại mọi thời điểm chỉ tối đa 100 kết nối TCP mở (throttling). Timeout TCP 5 giây; thực tế phản hồi < 100ms → dư sức quét 10.000 server trong 1 phút. Số worker cấu hình được qua `.env`.
+Sizing: `10.000 × 3s / 60s = 500` goroutine, +20% → **600** = 3 instance × 200.
+"Worker" là **goroutine**, không phải container.
 
-#### Distributed Lock với Redis
-Để tránh nhiều instance `monitor-service` cùng quét: trước mỗi vòng, instance giành key `health-check-lock` (TTL 90s) trong Redis. Instance không lấy được khóa thì bỏ qua vòng đó. Nếu instance giữ khóa crash, sau 90s khóa tự hết hạn → tránh deadlock.
+**`checks_missing`** (`LLEN` queue lúc round kết thúc) là tín hiệu **duy nhất** báo
+thiếu worker — không có nó thì hệ thống ping thiếu server mà không ai biết.
 
-#### Quy trình mỗi phút
-1. Cron reo → xin distributed lock → load danh sách server từ PostgreSQL (đọc chéo schema).
-2. 100 worker TCP Connect song song tới `tcp-simulator:9001-19000`.
-3. So sánh 10.000 kết quả mới với kết quả phút trước (Redis) → tìm server đổi trạng thái.
-4. Bắn event `server.status.changed` cho các server thay đổi (vd 10/10.000).
-5. **Batch Update** PostgreSQL chỉ các server thay đổi (tiết kiệm I/O).
-6. **Bulk Index** toàn bộ 10.000 bản ghi log vào Elasticsearch (vài chục ms).
-7. Cập nhật trạng thái mới nhất vào Redis cho phút sau so sánh.
+**Số đo thật với 10.001 server** (1 instance, 200 goroutine, TCP Simulator):
 
-#### Elasticsearch Index `server-status-logs`
-Mapping: `server_id` (keyword), `server_name` (text), `status` (keyword on/off), `latency_ms` (integer), `checked_at` (date), `error_msg` (text).
+| Chỉ số | Giá trị |
+|---|---|
+| `round_duration` trung bình | **3,5s** (ngân sách 60s) |
+| `checks_missing` | 0 |
+| `tcp_latency` trung bình | 4,3ms |
+| Rebuild projection | 1,7s |
 
-### 8.2. Quản lý Server (CRUD)
-- **Create**: validate (IP format, trùng lặp) → lưu PostgreSQL (`status=off`) → publish `server.created` → Monitor tạo cấu hình health-check.
-- **Update**: cập nhật PostgreSQL → xóa cache Redis → publish `server.updated`. **Không cho sửa `server_id`.**
-- **Delete (soft)**: set `deleted_at` → publish `server.deleted` → Monitor gỡ khỏi danh sách.
-- **Read/Filter**: lọc theo `status`, `os`, `location`, `server_name`, `ipv4`; `sort_by` + `sort_order`; `page` + `page_size`. Kết quả cache Redis.
+Công thức 600 goroutine là **cận trên xấu nhất** (giả định mọi check tốn trọn 3s
+timeout). Khi server trả lời bình thường, 200 goroutine trên 1 instance đã thừa.
 
-### 8.3. Import & Export Excel
-- **Import (async)**: upload `.xlsx` → tạo `import_job` (pending) → trả `job_id` ngay → bắn `import.job.created` → consumer nền parse, validate, ghi các dòng hợp lệ, **bỏ qua `server_id`/`server_name` trùng**, ghi `import_job_details`, publish `server.created`. Client poll `GET /servers/import/{job_id}` để lấy danh sách thành công/thất bại + lý do.
-- **Export (sync)**: query DB theo bộ lọc → tạo file Excel trong RAM (`excelize`) → stream về client.
+> **Điều kiện bắt buộc:** Redis `PoolSize` phải ≥ số worker. `BRPOP` giữ connection suốt
+> thời gian block, nên pool mặc định của go-redis (`10 × GOMAXPROCS` = 80) nhỏ hơn 200
+> worker sẽ vừa chặn concurrency ở 80, vừa bỏ đói scheduler (nạp queue mất 45s thay vì 1s).
+
+→ [07-flow-health-check.md](./07-flow-health-check.md)
+
+### 8.2. CRUD server
+
+Cache-aside với version trong key; `last_checked_at` đọc tươi từ Redis nên không phá
+cache. Target projection ghi hash trước/ID sau khi tạo, ID trước/hash sau khi xóa.
+
+→ [06-flow-server-crud.md](./06-flow-server-crud.md)
+
+### 8.3. Import & Export
+
+Import báo cáo 3 nhóm tách bạch: `succeeded` / `failed` / `skipped_duplicate`. Lỗi dòng
+không làm hỏng request; chỉ lỗi file mới từ chối tất cả.
+
+→ [08-flow-import-export.md](./08-flow-import-export.md)
 
 ### 8.4. Báo cáo & Email
-- **Báo cáo định kỳ (Daily Cron 8:00 AM)**: query Elasticsearch tính uptime ngày hôm trước → lưu snapshot PostgreSQL → tạo HTML email (header gradient, 4 stat cards, bảng Top 10 server uptime thấp nhất) → gửi qua Gmail SMTP.
-- **Báo cáo chủ động (On-Demand)**: `POST /api/v1/reports` với khoảng ngày + email → tính toán → gửi email.
 
-**Công thức Uptime:**
-```
-Uptime(server) = (số lần check status = "on") / (tổng số lần check thực tế) × 100%
-```
+Snapshot 00:30 → `daily_snapshots`; report chỉ đọc bảng đó. Thiếu snapshot thì **từ
+chối và nêu tên ngày**. Ba state gửi mail, trong đó `delivery_unknown` ghi nhận sự thật
+"không biết mail có tới không" thay vì đoán bừa.
+
+→ [09-flow-reporting-email.md](./09-flow-reporting-email.md)
 
 ---
 
-## 9. Chiến lược Caching (Redis)
+## 9. Caching
 
-| Key Pattern | TTL | Mục đích | Service |
-|-------------|:---:|---------|---------|
-| `servers:list:{hash}` | 5 min | Cache danh sách server phân trang | Server |
-| `server:detail:{id}` | 10 min | Cache chi tiết 1 server | Server |
-| `report:summary:{start}:{end}` | 1 hour | Cache uptime summary | Report |
-| `rate_limit:{ip}` | 1 min | Sliding window rate limiter | Gateway |
-| `token:blacklist:{jti}` | 15 min | Logout token blacklist | Auth |
-| `health:lock` | 55–90 sec | Distributed scheduler lock | Monitor |
-| `health:status:{server_id}` | 65 sec | Trạng thái health mới nhất | Monitor |
+```text
+server:list:cache:{query_hash}:{list_version}
+server:stats:cache                              TTL 10s
+```
 
-**Cache Invalidation:** write-through khi update/delete; bulk pattern-delete (`SCAN` + `DEL`) khi mass import.
+Version nằm **trong key** → bump không cần xóa key nào, TTL tự dọn key cũ.
+
+Bump khi: mutation server, hoặc consumer apply được status event **có thật**. Không bump
+khi status không đổi — và vì status hiếm khi đổi, cache hầu như luôn hit.
 
 ---
 
 ## 10. Logging & Observability
 
-- **Structured JSON Logging** với **zerolog** (zero-allocation). Mỗi log entry gồm: `timestamp`, `level`, `request_id`, `service`, `message`, `caller`.
-- **Log Rotation** với **lumberjack**: cấu hình max size, max backups, max age; tự xoay file khi đạt giới hạn. Log files được mount volume trong Docker (`logs/`).
-- `request_id` xuyên suốt từ Gateway xuống các service giúp trace 1 request qua toàn hệ thống.
+**Log:** zerolog JSON ra file, lumberjack rotate (`LOG_MAX_SIZE`, `LOG_MAX_BACKUPS`,
+`LOG_MAX_AGE`, `LOG_COMPRESS`), request ID xuyên suốt.
+
+**Metrics** (`/metrics` của monitor, Prometheus):
+
+| Metric | Ý nghĩa |
+|---|---|
+| `vcs_monitor_round_duration_seconds` | Round bắt đầu → queue cạn |
+| `vcs_monitor_targets_expected` | Target nạp vào queue |
+| `vcs_monitor_checks_completed_total` | Ping hoàn thành |
+| **`vcs_monitor_checks_missing`** | **Việc chưa kịp ping lúc round kết thúc** |
+| `vcs_monitor_queue_depth` | Độ sâu queue |
+| `vcs_monitor_tcp_latency_seconds` | Histogram TCP connect |
+| `vcs_monitor_es_bulk_failure_total` | Batch bulk bị bỏ sau retry |
 
 ---
 
-## 11. Chiến lược kiểm thử (Testing)
+## 11. Kiểm thử
 
-### 11.1. Hạ tầng test
+### 11.1. Hạ tầng
 
-| Thành phần | Công cụ | Pattern |
-|-----------|---------|---------|
-| Database | `go-sqlmock` + GORM | ExpectQuery/ExpectExec với regex |
-| HTTP | `httptest.NewRecorder` | Table-driven tests |
-| Mocks | Function-callback structs | Mock struct implement interface |
-| Kafka | `fakeProducer` / `fakeConsumer` | In-memory channel-based |
-| Redis | `fakeCache` / `miniredis` | In-memory |
-| Elasticsearch | Mock `http.RoundTripper` | Intercept HTTP call |
+| Công cụ | Mục đích |
+|---|---|
+| `go test` | Unit test |
+| `mockery` | Mock từ interface (chỉ nơi thật cần) |
+| `sqlmock` | Repository test |
+| `httptest` | HTTP handler + stub Elasticsearch |
+| Postgres / ES thật | Integration test có cổng env |
 
-### 11.2. Coverage theo service (core business packages)
+### 11.2. Số lượng
 
-Số liệu đo bằng `go test ./... -cover -count=1` trên từng module. Toàn bộ core business package đều đạt **≥ 90%**.
+| Module | Test |
+|---|---:|
+| shared | 22 |
+| auth-service | 83 |
+| server-service | 175 |
+| monitor-service | 46 |
+| report-service | 65 |
+| tcp-simulator | 15 |
+| **Tổng** | **406** |
 
-| Service | Package (coverage) | Khoảng |
-|---------|--------------------|:------:|
-| **auth-service** | handler 96.8% · repository 95.2% · service 94.4% | 94.4–96.8% |
-| **server-service** | handler 96.6% · repository 98.2% · service 91.4% | 91.4–98.2% |
-| **api-gateway** | middleware 93.0% · proxy 91.7% · router 97.6% · swagger 91.3% | 91.3–97.6% |
-| **monitor-service** | checker 100% · service 100% · repository 97.8% · scheduler 94.4% · worker 90.0% | 90.0–100% |
-| **report-service** | handler 94.3% · email 94.1% · scheduler 93.8% · service 90.3% · repository 90.2% | 90.2–94.3% |
-| **fileio-service** | handler 100% · repository 95.1% · service 91.0% · excel 90.2% | 90.2–100% |
-| **tcp-simulator** | simulator 94.1% | 94.1% |
-| **shared** | pkg/jwt 94.4% · kafka 92.6% | 92.6–94.4% |
+6/6 module: `go build` ✅ `go vet` ✅ `go test` ✅
 
-> Coverage tính trên core business packages. Các package wiring/khai báo (`cmd`, `config`, `database`, `model`, `dto`, `mocks`) là glue code hoặc data structure nên không có unit test riêng (hiển thị `no test files`).
+### 11.3. Giới hạn của sqlmock
+
+`sqlmock` chỉ **so khớp chuỗi SQL**, không chạy SQL. Nó không thể phát hiện một truy vấn
+cú pháp đúng nhưng **ngữ nghĩa sai**. Bug `Totals` đếm server-day thay vì server (§9.4
+của design) sống sót qua toàn bộ unit test chính vì lý do này.
+
+Vì vậy các truy vấn aggregate có thêm integration test chạy trên PostgreSQL thật, và
+ILM/mapping có integration test chạy trên Elasticsearch thật. Chúng tự `skip` khi biến
+môi trường không được set, nên `go test ./...` vẫn xanh khi không có hạ tầng:
+
+```bash
+REPORT_TEST_DATABASE_URL="postgres://..."   go test ./internal/repository/ -run Integration
+MONITOR_TEST_ES_URL="http://localhost:9200" go test ./internal/database/   -run Integration
+```
 
 ---
 
 ## 12. Triển khai & vận hành
 
-### 12.1. Docker Compose — Full Stack
+### 12.1. Docker Compose
 
 ```bash
-cp .env.example .env          # cấu hình JWT_SECRET, SMTP_PASSWORD...
-docker compose up -d --build  # 11 runtime containers + kafka-init one-shot
-docker compose ps
-make seed                     # seed 10.000 servers
-curl http://localhost:8080/health
+docker compose up --build      # 10 container
+make seed                      # 10.000 server vào server_db
+make rebuild-cache             # BẮT BUỘC sau seed/khôi phục
 ```
 
-### 12.2. Container Inventory
+### 12.2. Container
 
-| Container | Image | Port | Mô tả |
-|-----------|-------|:----:|-------|
-| `vcs-sms-postgres` | postgres:17-alpine | 5432 | Primary database |
-| `vcs-sms-redis` | redis:8-alpine | 6379 | Cache + Rate Limiting |
-| `vcs-sms-elasticsearch` | elasticsearch:8.12.0 | 9200 | Uptime logs |
-| `vcs-sms-kafka` | apache/kafka:3.9.0 | 9092 | Message broker |
-| `vcs-sms-gateway` | custom (Go) | 8080 | API Gateway |
-| `vcs-sms-auth` | custom (Go) | 8081 | Auth Service |
-| `vcs-sms-server` | custom (Go) | 8082 | Server Service |
-| `vcs-sms-monitor` | custom (Go) | 8083 | Monitor Service |
-| `vcs-sms-report` | custom (Go) | 8084 | Report Service |
-| `vcs-sms-fileio` | custom (Go) | 8085 | FileIO Service |
-| `vcs-sms-tcp-simulator` | custom (Go) | 9001–19000 | TCP Simulator |
-| `vcs-sms-web` | custom (Next.js) | 3000 | Frontend Dashboard |
+| Container | Port ra host | Ghi chú |
+|---|---|---|
+| `traefik` | **8080** | Lối vào duy nhất của API |
+| `web` | **3000** | Next.js |
+| `postgres` | 5432 | 3 database |
+| `redis` | 6379 | |
+| `elasticsearch` | 9200 | |
+| `tcp-simulator` | — | Giả lập 10.000 server |
+| `auth-service` | *expose 8081* | Không ra host |
+| `server-service` | *expose 8082* | Không ra host |
+| `monitor-service` | *expose 8083* | Không ra host |
+| `report-service` | *expose 8084* | Không ra host |
 
-Tất cả service Go dùng **multi-stage build**: build stage `golang:1.24-alpine`, run stage `alpine:3.19` (~15MB).
+### 12.3. Ghi chú vận hành
+
+| Việc | Lưu ý |
+|---|---|
+| Sau seed / khôi phục | **Luôn** `make rebuild-cache`. Thiếu marker `ready`, Monitoring bỏ qua **mọi** round |
+| Contract stream | `changed_at` phải RFC3339. Lệch format → consumer ACK rồi vứt **im lặng** |
+| Redis maxmemory | `allkeys-lru` có thể evict stream. Consumer tự phục hồi, nhưng event bị evict là **mất thật** |
+| Trước production | Set `SMTP_RECIPIENT_DOMAINS`, đổi `JWT_SECRET`, tắt `/register` |
 
 ---
 
 ## 13. Công nghệ sử dụng
 
 | Lớp | Công nghệ | Phiên bản |
-|-----|-----------|:---------:|
-| Ngôn ngữ | Go | 1.24+ |
-| HTTP Framework | Gin | v1.12 |
-| ORM | GORM | v1.31 |
-| Database | PostgreSQL | 17 |
-| Cache | Redis | 8 |
-| Search/Analytics | Elasticsearch | 8.12 |
-| Message Queue | Apache Kafka (KRaft) | 3.9 |
-| Kafka Client | segmentio/kafka-go | v0.4 |
+|---|---|---|
+| Ngôn ngữ | Go | 1.24+ (service: 1.25) |
+| HTTP | Gin | v1.12 |
+| ORM | GORM + pgx | v1.31 |
+| Gateway | Traefik (ForwardAuth, rate limit) | v3.0 |
+| Database | PostgreSQL — 3 database | 16 |
+| Cache / Stream | Redis (go-redis) | 7 / v9 |
+| Search | Elasticsearch (go-elasticsearch) | 8.12 / v8 |
+| Auth | JWT HS256 + Argon2id | — |
 | Excel | excelize | v2 |
-| Email | gomail | v2 |
+| Email | `net/smtp` (STARTTLS) | stdlib |
 | Scheduler | robfig/cron | v3 |
-| Logging | zerolog + lumberjack | v1.35 / v2.2 |
+| Log | zerolog + lumberjack | v1.35 / v2.2 |
+| Metrics | prometheus/client_golang | v1.23 |
 | Config | viper | v1.21 |
-| Testing | sqlmock + httptest | — |
+| Test | go test, mockery, sqlmock, httptest | — |
 | Frontend | Next.js + React + TailwindCSS | — |
-| Container | Docker + Docker Compose | 29+ / v5 |
+| Hạ tầng | Docker Compose | v5 |
+
+**`net/smtp` thay `gomail`:** `gomail.DialAndSend` chỉ trả `error`, không cho biết lỗi
+xảy ra **trước hay sau** khi body lên dây → không phân biệt được `failed` với
+`delivery_unknown`.
 
 ---
 
@@ -579,36 +556,46 @@ Tất cả service Go dùng **multi-stage build**: build stage `golang:1.24-alpi
 
 ### 14.1. Mức độ hoàn thành
 
-| Tính năng | Trạng thái |
-|-----------|:----------:|
-| Health Check 10K server (TCP, Worker Pool, ES) | ✅ Hoàn thành |
-| Server CRUD (filter, sort, paginate, cache) | ✅ Hoàn thành |
-| Import Excel (async Kafka) | ✅ Hoàn thành |
-| Export Excel | ✅ Hoàn thành |
-| Báo cáo định kỳ (Daily Email) | ✅ Hoàn thành |
-| API báo cáo chủ động | ✅ Hoàn thành |
-| JWT Auth + Refresh + Blacklist | ✅ Hoàn thành |
-| RBAC (3 roles, 10 scopes) | ✅ Hoàn thành |
-| OpenAPI / Swagger UI | ✅ Hoàn thành |
-| Unit Test ≥ 90% (core) | ✅ Hoàn thành |
-| SQL Injection Protection (GORM) | ✅ Hoàn thành |
-| Error Handling (17 mã lỗi) | ✅ Hoàn thành |
-| Logging + Logrotate | ✅ Hoàn thành |
-| Elasticsearch Uptime | ✅ Hoàn thành |
-| Redis Cache | ✅ Hoàn thành |
-| Kafka Event-Driven (7 topics) | ✅ Hoàn thành |
-| Docker Compose + Web UI | ✅ Hoàn thành |
+| Hạng mục | Trạng thái |
+|---|---|
+| CRUD + filter/sort/paginate + cache | ✅ |
+| Import / Export Excel | ✅ |
+| Health check 10.000 server | ✅ đã verify thật với TCP Simulator |
+| Report + coverage + top 10 | ✅ |
+| Email | ✅ đường SMTP chạy tới bước AUTH; **cần App Password thật** |
+| JWT + RBAC scope | ✅ |
+| OpenAPI | ✅ |
+| Unit test | ✅ 406 test |
+| Log file + rotate | ✅ |
+| Metrics | ✅ 7/7 |
+| ILM retention | ✅ |
+| Load test 10.001 server | ✅ round 3,5s, `checks_missing` 0 (xem §8.1) |
+| Multi-instance monitor | ⏳ **chưa chứng minh** |
 
 ### 14.2. Điểm nhấn kiến trúc
 
-- **TCP Simulator Pool**: giải pháp sáng tạo giả lập 10.000 server thật bằng 1 container, cho phép Monitor Service chạy y hệt production.
-- **Worker Pool + Distributed Lock**: xử lý concurrent health-check có throttling, an toàn khi scale nhiều instance.
-- **Separate Schemas + Cross-Schema GRANT**: cô lập dữ liệu cấp database nhưng vẫn tối ưu hiệu năng đọc chéo.
-- **Event-Driven (Kafka KRaft)**: decoupling, chống sốc tải, nền tảng cho Alerting/Analytics tương lai.
-- **Cache-aside (Redis)**: tối ưu read-heavy endpoints + rate limiting + distributed lock + blacklist.
+1. **Chỉ phát event khi status đổi** — biến cache từ vô dụng thành gần như luôn hit.
+2. **Lua script atomic** — không có cửa sổ nào Redis status và stream mâu thuẫn.
+3. **Version guard** — mọi apply idempotent, nhờ đó replay cả stream là an toàn.
+4. **`round_id` từ Redis TIME** — nhiều instance thống nhất mà không cần điều phối.
+5. **Snapshot 00:30** — ES chết không làm chết report, và là mắt xích cho ILM 7 ngày.
+6. **`uptime_pct` NULL chứ không 0** — không biến sự cố thu thập thành báo cáo sai.
+7. **Coverage phơi bày** — report nói ra phần nó không đo được.
+8. **Hai tầng bảo mật** — ForwardAuth trả lời "ai", `RequireScope` trả lời "được làm gì".
+9. **TCP Simulator** — giả lập 10.000 server bằng một container.
+
+### 14.3. Còn lại
+
+| # | Việc | Ghi chú |
+|---|---|---|
+| 1 | Email thật | Chỉ cần App Password 16 ký tự |
+| 2 | Load test 10.000 server | Cần đo: sizing worker, chi phí `top_hits`, thời gian import |
+| 3 | Multi-instance monitor | Chứng minh 2+ instance chia việc qua `BRPOP` |
+| 4 | Export 100 query / 10.000 server | Đánh đổi có chủ đích; chỉ sửa nếu đo thấy chậm thật |
 
 ---
 
-> **Tài liệu liên quan:** `docs/architecture.md`, `docs/api-spec.yaml`, `docs/02-database-strategy.md`, `docs/03-event-driven-kafka.md`, `docs/04-high-concurrency-worker-pool.md`, `docs/05-security-jwt-rbac.md`, `docs/06-flow-server-crud.md`, `docs/07-flow-health-check.md`, `docs/08-flow-import-export.md`, `docs/09-flow-reporting-email.md`.
+> **Tài liệu liên quan:** `design.md` (đặc tả đầy đủ), `refactor.md` (đối chiếu cũ↔mới),
+> `docs/api-spec.yaml`, và các file `docs/01`–`docs/09`.
 >
 > **VCS Server Management System © 2026** — Chương trình đào tạo VCS Passport

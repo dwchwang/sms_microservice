@@ -148,7 +148,133 @@ Trên stack sạch (`docker compose down -v` → `up --build`):
 
 ---
 
+## Bug tìm ra khi rà lại code (17/07/2026) — đã sửa
+
+Ba bug này unit test không bắt được, và **không** nằm trong danh sách tồn đọng cũ.
+
+| # | Bug | Root cause | Bằng chứng |
+|---|---|---|---|
+| 1 | **ES nuốt lỗi bulk im lặng** | `_bulk` trả **HTTP 200 kể cả khi mọi item bị từ chối**; code chỉ xét `res.IsError()` nên `Write` trả `nil` → fact mất không dấu vết, `es_bulk_failure` báo 0, và retry (lý do tồn tại của `_id` tất định) **không bao giờ chạy**. Đúng kịch bản 10.000 server: ES trả `429 es_rejected_execution_exception` per-item. | Test `httptest` dựng response 200 + `errors:true` → đỏ trước, xanh sau. Verify thêm trên ES 8.12 thật: bulk sạch không báo nhầm, retry không nhân bản. |
+| 2 | **Report nhiều ngày đếm server-day thay vì server** | `Totals` trộn `COUNT(DISTINCT server_id)` với `COUNT(*) FILTER (...)`. Cửa sổ 1 ngày thì số row tình cờ **bằng** số server nên verify cũ không thấy. Cửa sổ 3 ngày, 4 server: `servers_uptime_partial = **-5**`, `avg = 64,29` thay vì 50, `top_10` trả trùng server. Bất biến §9.4 vỡ. | Chứng minh trên Postgres 16 thật. Đã gộp per-server bằng CTE. |
+| 3 | **RBAC không tồn tại + bypass được xác thực** | `AuthFromForwardAuth`/`RequireScope` **được định nghĩa nhưng không service nào gọi** — route còn comment `// JWT auth is handled by API Gateway` (di sản api-gateway đã xóa ở R7). ForwardAuth chỉ chứng minh JWT hợp lệ, không biết endpoint cần scope nào → **token `viewer` xóa được server**; 13 scope trong `init.sql` là đồ trang trí. Tệ hơn: compose publish `8082`/`8084` ra host → `curl -X DELETE host:8082/...` **không cần token**. | Đã gắn `RequireScope` theo bảng design §7.10/§10.4 cho server + report service; đổi `ports:` → `expose:` cho 4 service. 6 test mới cho `shared/middleware` (trước đó **không có test nào**). |
+
+> auth-service **không** dính bug 3: `requireScope` ở đó tự validate chữ ký JWT và đọc
+> scope từ claims trong token, không tin header. Đó là lý do nó không dùng shared middleware.
+
+## Bug tìm ra khi chạy thật 10.001 server (17/07/2026) — đã sửa
+
+Hai bug này **chỉ lộ ra dưới tải thật**, không unit test nào bắt được.
+
+| # | Bug | Root cause | Bằng chứng |
+|---|---|---|---|
+| 4 | **Redis pool 80 < 200 worker → scheduler bị bỏ đói** | `redis.NewClient` không set `PoolSize` → go-redis mặc định `10 × GOMAXPROCS` = **80**. Nhưng `MONITOR_WORKER_COUNT=200`. BRPOP giữ connection suốt 1s timeout, nên scheduler phải chờ connection trống cho **từng** lệnh SSCAN/RPUSH → `tick()` mất **45s** thay vì ~1s. Hai hệ quả: (a) queue nạp trễ 45s, tải lớn hơn sẽ vượt 60s → **mất hẳn round** mà `checks_missing` không thấy vì queue chưa từng tồn tại; (b) công thức sizing §8.5 bị vô hiệu — đặt 200 worker nhưng thực tế chỉ 80 chạy. | `blocked_clients: 81`, `connected_clients: 84`. Sau khi set `PoolSize = workers + 16`: 220/181, tick 45s → **~1s**. |
+| 5 | **Scheduler tick không neo vào ranh giới round** | `time.NewTicker(60s)` bắt đầu đếm từ lúc process boot → pha ngẫu nhiên. Round R được nạp queue giữa chừng round R. Một tick trễ >60s (GC, Redis chậm) làm Go **bỏ tick** → cả round không được nạp. Ngoài ra `checks_missing` đo ở thời điểm trôi nổi chứ không phải lúc round kết thúc như §8.5 yêu cầu. | Log "Round loaded" ở offset 42–47s. Sau khi neo bằng Redis TIME: offset **0–2s**, và `checks_missing` giờ đo đúng ranh giới round. |
+
+Hai bug này che lẫn nhau: pha lệch làm `round_duration` đo ra 86s (gồm cả thời gian chờ
+scheduler), khiến con số vô nghĩa cho tới khi sửa cả hai.
+
+| # | Bug | Root cause | Bằng chứng |
+|---|---|---|---|
+| 6 | **Không có CORS → web hoàn toàn không dùng được** | Web ở `:3000` gọi API ở `:8080` là **cross-origin**, trình duyệt gửi preflight `OPTIONS` trước. Không chỗ nào trong hệ thống cấu hình CORS → preflight trả **404** (hoặc **401** trên route có ForwardAuth, vì preflight không mang `Authorization`) → trình duyệt chặn **mọi** request, kể cả login. `curl` không gửi preflight nên toàn bộ verify bằng curl không thấy gì. | Log auth-service: `OPTIONS /api/v1/auth/login → 404`. Đã thêm middleware `cors` ở Traefik, đặt **trước** `forward-auth` trong chuỗi. Preflight giờ trả **200**. |
+
+> `Idempotency-Key` phải nằm trong `accessControlAllowHeaders` (FE gửi nó ở `POST /servers`
+> và `/servers/import`), và `Content-Disposition` phải nằm trong `accessControlExposeHeaders`
+> thì export mới đọc được tên file.
+
+### Load test 10.001 server — số đo thật
+
+1 instance, 200 goroutine, TCP Simulator:
+
+| Chỉ số | Giá trị |
+|---|---|
+| `targets_expected` | 10.001 |
+| `round_duration` trung bình | **3,5s** (17/18 round ≤ 5s) — ngân sách 60s |
+| `checks_missing` | **0** |
+| `tcp_latency` trung bình | **4,3ms** (178.212 mẫu) |
+| `es_bulk_failure` | 0 |
+| Rebuild projection 10.001 target | 1,7s |
+
+**Công thức §8.5 (600 goroutine / 3 instance) là cận trên xấu nhất**, giả định mọi check
+tốn trọn 3s timeout. Thực tế server trả lời trong ~4ms nên **200 goroutine / 1 instance
+đã thừa sức**. Con số 600 vẫn đúng cho tình huống phần lớn server chết (toàn timeout).
+
+### Vì sao unit test không bắt được
+
+`sqlmock` chỉ **so khớp chuỗi SQL**, không chạy SQL — nó không thể thấy một truy vấn
+cú pháp đúng nhưng ngữ nghĩa sai. Bug 1 và 2 nay có **integration test chạy trên
+Postgres/ES thật**, tự `skip` khi thiếu biến môi trường nên `go test ./...` vẫn xanh:
+
+```bash
+REPORT_TEST_DATABASE_URL="postgres://..."   go test ./internal/repository/ -run Integration
+MONITOR_TEST_ES_URL="http://localhost:9200" go test ./internal/database/   -run Integration
+```
+
+---
+
+## Đã bổ sung (17/07/2026)
+
+| Mục | Trạng thái |
+|---|---|
+| **7 metric §8.5** | ✅ `/metrics` Prometheus trên monitor:8083 (nội bộ). `checks_missing` đo bằng `LLEN` queue round trước tại mỗi tick scheduler; `round_duration` do sampler ghi khi queue cạn (dùng **Redis TIME**, không phải đồng hồ máy). |
+| **ILM retention §12.4** | ✅ Policy `{prefix}-retention` (hot 0–7d → delete) cài lúc boot, gắn vào index template. Verify trên ES 8.12 thật: index mới thừa kế policy, mapping vẫn `keyword`. |
+| **docs/** | ✅ Viết lại `01`–`09` + `BaoCao-MoTa-ThietKe-HeThong.md` cho thiết kế mới; `03-event-driven-kafka.md` → `03-event-driven-redis-stream.md`; xóa `architecture.md`. Giữ nguyên bài nộp Checkpoint 1 (`report.md`), `debai.md`, `brainstorm_vcs_sms.md`, `api-spec.yaml`. Hướng dẫn sử dụng viết sau. |
+
+Test: **406** (từ 386). 6/6 module `build` ✅ `vet` ✅ `test` ✅
+
+---
+
+## Bổ sung: dashboard uptime luỹ kế (17/07/2026)
+
+Trang `/reports` là **dashboard**, không phải báo cáo theo kỳ — nó phải hiện số ngay,
+không chờ snapshot 00:30. Nhưng `/servers` chỉ có status *hiện tại*, còn uptime là tỉ lệ
+*lịch sử*.
+
+**Không chọn:** đếm trong PostgreSQL như hệ thống cũ → mỗi check là một UPDATE, và
+Monitoring phải phát event **mỗi lần check** thay vì chỉ khi status đổi → `list:version`
+nhảy liên tục → **cache chết**. Đó đúng là thứ cả cuộc refactor này sinh ra để tránh (§6.3).
+
+**Không chọn:** đọc ES mỗi lần mở dashboard như hệ thống cũ → vi phạm §12.4 (ES chết là
+dashboard chết) và tốn kém trên 14,4M doc/ngày.
+
+**Đã chọn:** đếm ngay trong Lua script vốn đã chạy mỗi check — **0 round-trip thêm**.
+
+```lua
+-- Đặt SAU version guard, nên replay/event cũ không làm phồng số đếm
+local total = redis.call('HINCRBY', status_key, 'total_checks', 1)
+if new_status == 'ON' then ons = redis.call('HINCRBY', status_key, 'on_checks', 1) end
+redis.call('ZADD', 'monitor:uptime:index', (ons / total) * 100, server_id)
+```
+
+`GET /api/v1/servers/uptime` (scope `server:stats`, cache 10s) đọc ra bằng ZCOUNT/ZRANGE
+— không lệnh nào scale theo số server. Đo thật 10.001 server: **0,125s**, và bất biến
+`6775 + 3226 + 0 + 0 = 10001` giữ đúng.
+
+Ba thứ phải sửa kèm, nếu không bộ đếm âm thầm mất:
+
+| Việc | Lý do |
+|---|---|
+| `--appendonly yes` | Redis vốn **không** có persistence (`command:` ghi đè config mặc định) → restart là mất sạch |
+| `allkeys-lru` → `volatile-lru` | Redis được phép evict **bất kỳ** key nào, kể cả counter/status/stream/projection. Chỉ cache mới có TTL, nên volatile-lru evict đúng thứ cần evict. Đồng thời vá luôn rủi ro "stream bị evict" mà README từng ghi nhận |
+| `ZREM` + `DEL monitor:status:{id}` khi xóa server | Không dọn thì server đã xóa vẫn chấm điểm trong dashboard và top-10 mãi mãi (đồng thời vá rò rỉ key phát hiện trước đó) |
+
+Lua script trước đó **không có test nào** — thứ logic quan trọng nhất hệ thống, chỉ
+verify bằng tay. Nay có 4 integration test trên Redis thật, gồm chốt "replay và event cũ
+không làm phồng bộ đếm":
+
+```bash
+docker run -d --rm -p 56379:6379 redis:8-alpine
+MONITOR_TEST_REDIS_ADDR=localhost:56379 go test ./internal/monitor/ -run Integration
+```
+
+`daily_snapshots` giữ nguyên vai trò: email hằng ngày + báo cáo lịch sử theo kỳ. Nếu
+Redis mất sạch, bộ đếm reset và uptime tính lại từ đầu — lịch sử thật vẫn ở `daily_snapshots`.
+
+---
+
 ## ⚠️ Còn tồn đọng
+
+> Metrics, ILM và docs đã xong — xem phần trên. Bốn mục còn lại đều **cần môi trường
+> chạy thật hoặc credential**, không phải code còn thiếu.
 
 ### 1. Chưa gửi email thật
 `.env` đang là App Password placeholder. Đường SMTP đã chạy đến bước auth và bị Gmail
@@ -160,52 +286,23 @@ từ chối đúng như mong đợi — chỉ cần điền credential thật.
 Nhớ set `SMTP_RECIPIENT_DOMAINS` trước khi lên production — để rỗng nghĩa là **cho phép
 gửi tới bất kỳ ai**, tức hệ thống có thể bị lợi dụng làm mail relay (design §9.9).
 
-### 2. Chưa load test 10.000 server
-Mới verify với 3–5 server. Seed đã đúng schema nên chạy được:
+### 2. Còn hai con số chưa đo
+Load test 10.001 server **đã chạy** — số đo ở phần trên (round 3,5s, `checks_missing` 0).
+Còn lại:
 
-```bash
-make seed           # 10.000 row vào server_db, tcp_port = 9000 + index
-make rebuild-cache  # bơm Redis target projection — không có bước này Monitor bỏ qua mọi round
-```
-
-**Chưa đo được (design yêu cầu ghi lại con số thật):**
-- Công thức sizing worker §8.5: `worker >= ceil(10000 × 3s / 60s) = 500`, +20% → 600 goroutine.
-  Chưa biết 200 worker/instance × 3 instance có đủ không.
-- Chi phí `top_hits` trên 14,4 triệu document/ngày §12.5. Nếu vượt ngưỡng, phương án thay
-  thế là bỏ `top_hits`, lấy `last_status` bằng query riêng với `collapse` theo `server_id`.
+- Chi phí `top_hits` trên 14,4 triệu document/ngày §12.5. Chưa đo được vì cần một ngày
+  ES đầy dữ liệu. Nếu vượt ngưỡng, phương án thay thế là bỏ `top_hits`, lấy `last_status`
+  bằng query riêng với `collapse` theo `server_id`.
 - Thời gian import 10.000 dòng (design §7.8 ước tính ~8s).
 
-### 3. Chưa có metrics endpoint
-Design §8.5 liệt kê 7 metric **bắt buộc**: `round_duration`, `targets_expected`,
-`checks_completed`, `checks_missing`, `queue_depth`, `tcp_latency`, `es_bulk_failure`.
-
-Quan trọng nhất là **`checks_missing`** (`LLEN monitor:ping:queue:{round_id}` đo lúc round
-kết thúc) — đây là tín hiệu **duy nhất** báo thiếu worker. Không có nó thì hệ thống ping
-thiếu server mà không ai biết.
-
-`FactBuffer` đã đếm sẵn `Dropped()` và `Failed()` (nguồn của `es_bulk_failure`) nhưng chưa
-expose ra ngoài.
-
-### 4. ILM retention chưa cấu hình
-Design §12.4: ES giữ raw fact **7 ngày** rồi xóa index. Hiện chưa có ILM policy →
-14,4 triệu doc/ngày (~2–3 GB/ngày) sẽ tích tụ vô hạn.
-
-Index template đã có (`server-status-logs-*`), chỉ cần gắn thêm ILM policy.
-
-### 5. Export tốn 100 query cho 10.000 server
+### 3. Export tốn 100 query cho 10.000 server
 `FindAll` cap `page_size` ở 100 để bảo vệ list API công khai, và export dùng chung nó
 (design §7.9 cấm viết SQL riêng cho export). Mỗi page lặp lại một `COUNT(*)`.
 
 Nếu export chậm thật, hướng đúng là chuyển cap xuống tầng validate DTO — nhưng đó là
 thay đổi hành vi của list API.
 
-### 6. 12 file markdown trong `docs/` đã lỗi thời
-Vẫn mô tả Kafka / FileIO / shared DB: `01-architecture-overview.md`,
-`03-event-driven-kafka.md`, `08-flow-import-export.md`, `report.md`, `architecture.md`, …
-
-`design.md` + `refactor.md` đã thay thế chúng. `docs/api-spec.yaml` **đã** được cập nhật ở R7.5.
-
-### 7. Chưa test multi-instance
+### 4. Chưa test multi-instance
 Design §8.1 nói lock chỉ dành cho scheduler, **mọi instance đều ping**. Mới chạy 1 instance
 monitor — chưa chứng minh 2+ instance chia việc đúng qua `BRPOP`.
 

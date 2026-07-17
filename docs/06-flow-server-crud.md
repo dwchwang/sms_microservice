@@ -1,35 +1,125 @@
-# Luồng vận hành: Cập nhật và Quản lý Server (CRUD)
+# 06 — Flow: CRUD server
 
-Mặc dù việc thêm/sửa/xóa Server nghe có vẻ là tính năng cơ bản nhất của một hệ thống, nhưng trong kiến trúc Event-Driven của VCS-SMS, mọi thao tác thay đổi dữ liệu đều tạo ra một chuỗi phản ứng dây chuyền (ripple effect) đến các service khác.
+---
 
-## 1. Luồng Tạo mới Server (Create)
+## 1. Tạo server
 
-1. **Người dùng gửi yêu cầu**: Quản trị viên (Admin) nhập thông tin server (IP, OS, CPU, RAM...) trên giao diện và bấm Lưu.
-2. **Gateway Xác thực**: API Gateway kiểm tra JWT xem người này có quyền `server:create` không. Nếu hợp lệ, nó chuyển tiếp dữ liệu xuống `server-service`.
-3. **Validate & Lưu trữ**: `server-service` kiểm tra xem IP hoặc Tên server đã tồn tại chưa. Định dạng IP có chuẩn IPv4 không. Sau đó, nó lưu bản ghi vào bảng `servers` trong PostgreSQL (lúc này trạng thái mặc định là `off`).
-4. **Phát sóng Sự kiện (Publish Event)**: 
-   Ngay khi lưu DB thành công, `server-service` không gọi điện báo trực tiếp cho ai cả. Nó ném một tin nhắn lên Kafka vào kênh (topic) `server.created`. Tin nhắn này chứa toàn bộ thông tin của server mới.
-5. **Monitor Service Lắng nghe**: `monitor-service` (luôn luôn túc trực nghe ngóng trên Kafka) nhận được tin nhắn. Nó tự động cập nhật danh sách server trong bộ nhớ của nó, sẵn sàng cho vòng quét Health-Check ở phút tiếp theo mà không cần phải chờ truy vấn lại toàn bộ Database.
+```text
+POST /api/v1/servers          Idempotency-Key: <bắt buộc>
+  │
+  ├─ Traefik ForwardAuth → JWT hợp lệ?
+  ├─ RequireScope("server:create") → 403 nếu thiếu
+  ├─ Idempotency middleware:
+  │     Claim(actor, endpoint, key, sha256(body))
+  │       ├─ key đã có + body trùng   → replay response cũ, DỪNG
+  │       ├─ key đã có + body khác    → 409, DỪNG
+  │       └─ key mới                  → state=processing, đi tiếp
+  │
+  ├─ Validate DTO  (client KHÔNG được set status)
+  ├─ CIDR allowlist → 422 SERVER_IP_NOT_ALLOWED
+  ├─ INSERT INTO servers (status='UNKNOWN', status_version=0)
+  ├─ Sync target projection:
+  │     HSET server:monitor-target:{id}  ipv4, tcp_port, server_name
+  │     SADD server:monitor-target:ids   {id}          ← hash TRƯỚC, id SAU
+  ├─ INCR server:list:version
+  └─ 201 + lưu response vào api_idempotency (state=completed)
+```
 
-## 2. Luồng Cập nhật Server (Update)
+**Ghi hash trước, thêm ID sau.** Ngược lại thì Monitor có thể nhặt được ID mà chưa có
+metadata để ping.
 
-1. Quản trị viên thay đổi thông tin (ví dụ: đổi server từ mục đích "Web" sang "Database").
-2. `server-service` cập nhật vào Postgres.
-3. Đồng thời xóa Cache (bộ nhớ tạm) của server này trong Redis để lần truy xuất sau người dùng lấy được dữ liệu mới nhất.
-4. Bắn event `server.updated` lên Kafka. Các dịch vụ khác nếu cần (ví dụ dịch vụ Alerting sau này) có thể biết được thông tin server vừa thay đổi để điều chỉnh logic.
+**Client không set được `status`.** DTO không có field đó. Status chỉ đến từ
+monitoring — đó là toàn bộ ý nghĩa của nó.
 
-## 3. Luồng Xóa Server (Soft Delete)
+---
 
-Trong các hệ thống quản trị lớn, chúng ta hiếm khi xóa hẳn dữ liệu khỏi ổ cứng (Hard Delete) vì lý do lịch sử và an toàn.
-1. Quản trị viên bấm Xóa Server.
-2. `server-service` không gọi lệnh `DELETE FROM`. Thay vào đó, nó cập nhật cột `deleted_at` thành thời gian hiện tại (Soft Delete). 
-3. Kể từ lúc này, mọi câu query lấy danh sách server đều tự động thêm điều kiện `WHERE deleted_at IS NULL` (bị ẩn khỏi người dùng).
-4. Nó bắn event `server.deleted` lên Kafka.
-5. `monitor-service` nhận được event này, nó lập tức gạch tên server này khỏi danh sách Health-Check. Ngừng việc tốn tài nguyên đi ping một server đã bị xóa.
+## 2. Đọc — cache-aside
 
-## 4. Luồng Xem danh sách (Read / Filter)
+```text
+GET /api/v1/servers?status=ON&page=1
+  │
+  ├─ v = GET server:list:version
+  ├─ key = server:list:cache:{sha256(query)}:{v}
+  ├─ HIT  → dùng luôn
+  └─ MISS → SELECT ... → SET key (TTL)
+  │
+  └─ Với mọi server trong kết quả:
+        HGET monitor:status:{id} last_checked_at    ← đọc tươi, pipeline
+```
 
-Vì hệ thống có 10.000 server, việc lấy toàn bộ dữ liệu 1 lúc là thảm họa.
-1. Người dùng gửi request kèm theo bộ lọc (Filter): Ví dụ "Lấy các server đang ON, chạy Ubuntu, sắp xếp theo tên, trang 1, mỗi trang 20 server".
-2. `server-service` sẽ dịch bộ lọc này thành câu truy vấn SQL chuẩn xác, tận dụng các Index (chỉ mục) đã tạo sẵn trong PostgreSQL để tìm kiếm với tốc độ mili-giây.
-3. Kết quả được lưu tạm vào Redis (Caching). Lần tới nếu có người truy vấn y hệt trang 1 này, hệ thống sẽ móc từ Redis ra trả về ngay lập tức mà không cần chọc xuống DB, giúp giảm tải cực kỳ hiệu quả.
+**`last_checked_at` không nằm trong cache entry.** Nó đổi mỗi phút; nếu nhét vào
+cache thì phải bump version mỗi phút và cache thành vô dụng. Đọc tươi từ Redis bằng
+pipeline rẻ hơn nhiều so với việc vứt cả cache đi.
+
+Version nằm **trong key**, nên bump version không cần xóa key nào cả.
+
+---
+
+## 3. Sửa server
+
+```text
+PUT /api/v1/servers/{server_id}
+  ├─ RequireScope("server:update")
+  ├─ Validate + CIDR
+  ├─ Tên mới trùng server đang sống khác? → 409
+  ├─ UPDATE servers ...
+  ├─ Sync lại target projection (ipv4/port/tên có thể đã đổi)
+  └─ INCR server:list:version
+```
+
+> **Bug đã sửa:** `cpu_cores`/`ram_gb`/`disk_gb` từng dùng `int` thuần. Cột `NULL` bị
+> GORM scan thành `0`, rồi `Save()` ghi `0` ngược xuống → vi phạm
+> `CHECK (cpu_cores IS NULL OR cpu_cores > 0)` → **500**. Nay dùng `*int` để phân biệt
+> "chưa set" với "bằng 0".
+
+---
+
+## 4. Xóa server
+
+```text
+DELETE /api/v1/servers/{server_id}
+  ├─ RequireScope("server:delete")
+  ├─ UPDATE servers SET deleted_at = NOW()      ← soft delete
+  ├─ Gỡ target projection:
+  │     SREM server:monitor-target:ids  {id}    ← id TRƯỚC
+  │     DEL  server:monitor-target:{id}         ← hash SAU
+  └─ INCR server:list:version
+```
+
+**Gỡ ID trước, xóa hash sau** — ngược với lúc tạo. Cả hai thứ tự đều nhằm để Monitor
+không bao giờ thấy ID mà thiếu metadata.
+
+`server_id` unique **toàn cục kể cả row đã xóa**, nên một ID đã dùng thì không tái sử
+dụng được. Đây là chủ ý: nó bảo vệ lịch sử trong `daily_snapshots` và ES khỏi bị
+lẫn giữa hai server khác nhau trùng ID.
+
+---
+
+## 5. Rebuild projection
+
+```text
+make rebuild-cache
+  │
+  ├─ Duyệt server đang sống theo cursor (page 1000)
+  ├─ Ghi vào key TẠM: server:monitor-target:ids:{generation}
+  ├─ RENAME key tạm → server:monitor-target:ids     ← atomic swap
+  ├─ SET server:monitor-target:ready 1
+  └─ Quét & xóa hash mồ côi (hash còn nhưng ID không còn trong Set)
+```
+
+Dựng Set dưới key tạm rồi `RENAME` để Monitor **không bao giờ thấy Set dựng dở**.
+
+Sửa được 3 loại lệch: thiếu hash, thiếu ID, hash mồ côi.
+
+> **Luôn chạy `make rebuild-cache` sau khi seed hoặc khôi phục dữ liệu.** Thiếu marker
+> `ready`, Monitoring **bỏ qua mọi round**.
+
+---
+
+## 6. `GET /servers/stats`
+
+Trả số ON/OFF/UNKNOWN **hiện tại**, cache TTL 10s (`server:stats:cache`), phục vụ
+dashboard realtime.
+
+Đừng nhầm với `servers_on_at_end_at` trong report: cái đó là ON/OFF **tại cuối kỳ
+report**. Hai câu hỏi khác nhau, hai nguồn khác nhau.

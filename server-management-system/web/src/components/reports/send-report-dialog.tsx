@@ -38,13 +38,24 @@ export function SendReportDialog({
     formState: { errors, isSubmitting },
   } = useForm<SendReportInput>({
     resolver: zodResolver(sendReportSchema),
-    values: { start_date: defaultStart, end_date: defaultEnd, email: "" },
+    values: { start_date: defaultStart, end_date: defaultEnd, recipient_email: "" },
   });
 
   async function onSubmit(values: SendReportInput) {
     try {
       const res = await send.mutateAsync(values);
-      toast.success(`${res.message} (ID: ${res.report_id.slice(0, 8)})`);
+      const id = res.id.slice(0, 8);
+      // delivery_unknown is neither success nor failure: the body was already on
+      // the wire when the error hit, so nobody knows whether it arrived.
+      if (res.state === "sent") {
+        toast.success(`Đã gửi báo cáo tới ${res.recipient_email} (job ${id})`);
+      } else if (res.state === "delivery_unknown") {
+        toast.warning(
+          `Không rõ mail đã tới hay chưa (job ${id}). Kiểm tra hộp thư Sent trước khi gửi lại.`,
+        );
+      } else {
+        toast.error(res.error_message ?? `Gửi thất bại (job ${id})`);
+      }
       onOpenChange(false);
     } catch (err) {
       handleFormError(err, setError);
@@ -67,8 +78,8 @@ export function SendReportDialog({
               <Input type="date" {...register("end_date")} />
             </Field>
           </div>
-          <Field label="Email nhận" error={errors.email?.message} required>
-            <Input type="email" placeholder="admin@company.com" {...register("email")} />
+          <Field label="Email nhận" error={errors.recipient_email?.message} required>
+            <Input type="email" placeholder="admin@company.com" {...register("recipient_email")} />
           </Field>
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>

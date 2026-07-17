@@ -16,13 +16,25 @@ import (
 // than creating each index by hand: indices are created daily by the first bulk
 // write, and without a template they would be mapped dynamically, turning the
 // keyword fields into text and breaking the uptime aggregation.
+// ilmPolicy keeps raw facts 7 days (design §12.4); daily_snapshots holds the
+// condensed history from then on.
+const ilmPolicy = `{
+  "policy": {
+    "phases": {
+      "hot":    { "actions": {} },
+      "delete": { "min_age": "7d", "actions": { "delete": {} } }
+    }
+  }
+}`
+
 const indexTemplate = `{
   "index_patterns": ["%s-*"],
   "template": {
     "settings": {
       "number_of_shards": 1,
       "number_of_replicas": 0,
-      "refresh_interval": "5s"
+      "refresh_interval": "5s",
+      "index.lifecycle.name": "%s"
     },
     "mappings": {
       "properties": {
@@ -73,9 +85,16 @@ func ConnectES(cfg ESConfig) (*elasticsearch.Client, error) {
 	return client, nil
 }
 
-// EnsureIndexTemplate installs the mapping template for the daily indices.
+// PolicyName is the ILM policy the daily indices are bound to.
+func PolicyName(prefix string) string { return prefix + "-retention" }
+
+// EnsureIndexTemplate installs the ILM policy and the mapping template.
 func EnsureIndexTemplate(ctx context.Context, client *elasticsearch.Client, prefix string) error {
-	body := fmt.Sprintf(indexTemplate, prefix)
+	if err := ensureILMPolicy(ctx, client, prefix); err != nil {
+		return err
+	}
+
+	body := fmt.Sprintf(indexTemplate, prefix, PolicyName(prefix))
 
 	res, err := client.Indices.PutIndexTemplate(
 		prefix,
@@ -90,6 +109,24 @@ func EnsureIndexTemplate(ctx context.Context, client *elasticsearch.Client, pref
 	if res.IsError() {
 		msg, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("index template rejected: [%s] %s", res.Status(), msg)
+	}
+	return nil
+}
+
+func ensureILMPolicy(ctx context.Context, client *elasticsearch.Client, prefix string) error {
+	res, err := client.ILM.PutLifecycle(
+		PolicyName(prefix),
+		client.ILM.PutLifecycle.WithBody(strings.NewReader(ilmPolicy)),
+		client.ILM.PutLifecycle.WithContext(ctx),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to put ILM policy: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		msg, _ := io.ReadAll(res.Body)
+		return fmt.Errorf("ILM policy rejected: [%s] %s", res.Status(), msg)
 	}
 	return nil
 }

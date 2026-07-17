@@ -19,6 +19,10 @@ const (
 	queuePrefix     = "monitor:ping:queue:"
 	statusKeyPrefix = "monitor:status:"
 	statusStream    = "stream:monitor.status"
+
+	// uptimeIndexKey scores every server by lifetime uptime %, so the dashboard
+	// gets the distribution with ZCOUNT and the worst servers with ZRANGE.
+	uptimeIndexKey = "monitor:uptime:index"
 )
 
 const (

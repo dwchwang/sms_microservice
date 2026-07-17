@@ -11,7 +11,7 @@ import (
 )
 
 func newTestScheduler(ops RedisOps) *Scheduler {
-	return NewScheduler(ops, zerolog.New(io.Discard))
+	return NewScheduler(ops, nil, zerolog.New(io.Discard))
 }
 
 func TestRoundID_BucketsByMinute(t *testing.T) {
@@ -144,5 +144,41 @@ func TestScheduler_RunStopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// The scheduler must load a round's queue at the round boundary, not at whatever
+// phase the process happened to boot at.
+func TestSleepToNextRound_AlignsToBoundary(t *testing.T) {
+	cases := []struct {
+		offset int64 // seconds into the round
+		want   time.Duration
+	}{
+		{offset: 0, want: RoundSeconds * time.Second},
+		{offset: 1, want: 59 * time.Second},
+		{offset: 37, want: 23 * time.Second},
+		{offset: 59, want: 1 * time.Second},
+	}
+
+	for _, tc := range cases {
+		ops := newFakeOps()
+		ops.now = time.Unix(29_737_890*RoundSeconds+tc.offset, 0).UTC()
+		s := newTestScheduler(ops)
+
+		got := s.nextRoundDelay(context.Background())
+		if got != tc.want {
+			t.Errorf("offset %ds: delay = %v, want %v", tc.offset, got, tc.want)
+		}
+	}
+}
+
+// Redis being unreachable must not stop the scheduler from ticking.
+func TestSleepToNextRound_FallsBackWhenRedisTimeFails(t *testing.T) {
+	ops := newFakeOps()
+	ops.timeErr = errBoom
+	s := newTestScheduler(ops)
+
+	if got := s.nextRoundDelay(context.Background()); got != RoundSeconds*time.Second {
+		t.Errorf("delay = %v, want %v", got, RoundSeconds*time.Second)
 	}
 }

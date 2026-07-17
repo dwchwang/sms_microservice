@@ -93,22 +93,37 @@ func (r *snapshotRepository) MissingDates(ctx context.Context, start, end time.T
 	return missing, nil
 }
 
-// Totals aggregates the window. AVG skips NULL uptime_pct, so servers with no
-// data cannot drag the average down.
+// Folds each server's days into one row first: counting rows counts server-days.
+const totalsQuery = `
+WITH per_server AS (
+	SELECT server_id,
+	       SUM(on_checks)       AS on_checks,
+	       SUM(actual_checks)   AS actual_checks,
+	       SUM(expected_checks) AS expected_checks
+	FROM daily_snapshots
+	WHERE date BETWEEN ? AND ?
+	GROUP BY server_id
+), classified AS (
+	SELECT actual_checks, expected_checks,
+	       -- NULL not 0: keeps no-data out of AVG and inside servers_no_data.
+	       CASE WHEN actual_checks > 0
+	            THEN on_checks::numeric / actual_checks * 100
+	       END AS uptime_pct
+	FROM per_server
+)
+SELECT COUNT(*) AS total_servers,
+       AVG(uptime_pct) AS avg_uptime_pct,
+       COUNT(*) FILTER (WHERE uptime_pct = 100) AS servers_uptime100,
+       COUNT(*) FILTER (WHERE uptime_pct = 0) AS servers_uptime0,
+       COUNT(*) FILTER (WHERE uptime_pct IS NULL) AS servers_no_data,
+       COALESCE(SUM(actual_checks), 0) AS sum_actual_checks,
+       COALESCE(SUM(expected_checks), 0) AS sum_expected_checks
+FROM classified`
+
+// Totals aggregates the window per server.
 func (r *snapshotRepository) Totals(ctx context.Context, start, end time.Time) (*Totals, error) {
 	var out Totals
-	err := r.db.WithContext(ctx).
-		Model(&model.DailySnapshot{}).
-		Select(`
-			COUNT(DISTINCT server_id) AS total_servers,
-			AVG(uptime_pct) AS avg_uptime_pct,
-			COUNT(*) FILTER (WHERE uptime_pct = 100) AS servers_uptime100,
-			COUNT(*) FILTER (WHERE uptime_pct = 0) AS servers_uptime0,
-			COUNT(*) FILTER (WHERE uptime_pct IS NULL) AS servers_no_data,
-			COALESCE(SUM(actual_checks), 0) AS sum_actual_checks,
-			COALESCE(SUM(expected_checks), 0) AS sum_expected_checks`).
-		Where("date BETWEEN ? AND ?", start, end).
-		Scan(&out).Error
+	err := r.db.WithContext(ctx).Raw(totalsQuery, start, end).Scan(&out).Error
 	return &out, err
 }
 
@@ -138,18 +153,32 @@ func (r *snapshotRepository) CountByLastStatus(ctx context.Context, date time.Ti
 	return out, nil
 }
 
-// LowestUptime ranks the worst servers. Rows with no data are excluded: they
-// are counted separately, and ranking them worst would assert something about
-// what was never measured.
+// Ranks servers, not server-days; server_name comes from the window's last snapshot.
+const lowestUptimeQuery = `
+WITH per_server AS (
+	SELECT server_id,
+	       SUM(on_checks)::numeric / NULLIF(SUM(actual_checks), 0) * 100 AS uptime_pct
+	FROM daily_snapshots
+	WHERE date BETWEEN ? AND ?
+	GROUP BY server_id
+), latest_name AS (
+	SELECT DISTINCT ON (server_id) server_id, server_name
+	FROM daily_snapshots
+	WHERE date BETWEEN ? AND ?
+	ORDER BY server_id, date DESC
+)
+SELECT p.server_id, n.server_name, p.uptime_pct
+FROM per_server p
+JOIN latest_name n USING (server_id)
+WHERE p.uptime_pct IS NOT NULL
+ORDER BY p.uptime_pct ASC, p.server_id ASC
+LIMIT ?`
+
+// LowestUptime ranks the worst servers, excluding those with no data.
 func (r *snapshotRepository) LowestUptime(ctx context.Context, start, end time.Time, limit int) ([]LowUptimeServer, error) {
 	var out []LowUptimeServer
 	err := r.db.WithContext(ctx).
-		Model(&model.DailySnapshot{}).
-		Select("server_id, server_name, uptime_pct").
-		Where("date BETWEEN ? AND ?", start, end).
-		Where("uptime_pct IS NOT NULL").
-		Order("uptime_pct ASC, server_id ASC").
-		Limit(limit).
+		Raw(lowestUptimeQuery, start, end, start, end, limit).
 		Scan(&out).Error
 	return out, err
 }

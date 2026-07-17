@@ -50,7 +50,7 @@ func (w *fakeWriter) attemptCount() int {
 }
 
 func newTestBuffer(w factWriter, capacity int) *FactBuffer {
-	return NewFactBuffer(w, capacity, zerolog.New(io.Discard))
+	return NewFactBuffer(w, capacity, nil, zerolog.New(io.Discard))
 }
 
 func fact(id string) Fact {

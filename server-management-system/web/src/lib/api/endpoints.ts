@@ -1,13 +1,14 @@
 import { api, unwrap } from "./client";
 import type {
-  ImportJobResponse,
-  ImportJobStatusResponse,
-  MonitorStatus,
+  ImportResponse,
+  JobResponse,
   ReportSummary,
-  SendReportResponse,
   ServerListResponse,
   ServerResponse,
+  ServerStatus,
+  StatsResponse,
   TokenResponse,
+  UptimeResponse,
   UserListResponse,
   UserProfile,
 } from "./types";
@@ -20,6 +21,11 @@ import type {
 } from "./schemas";
 
 type Env<T> = { data: T };
+
+// POST /servers and /servers/import reject a request without this header.
+function idempotencyKey(): Record<string, string> {
+  return { "Idempotency-Key": crypto.randomUUID() };
+}
 
 // ── Auth ──
 export const authApi = {
@@ -34,7 +40,7 @@ export const authApi = {
 
 // ── Servers ──
 export interface ServerListParams {
-  status?: "on" | "off";
+  status?: ServerStatus;
   server_id?: string;
   server_name?: string;
   ipv4?: string;
@@ -53,32 +59,36 @@ export const serverApi = {
       .then((r) => unwrap(r.data)),
   get: (serverId: string) =>
     api.get<Env<ServerResponse>>(`/servers/${serverId}`).then((r) => unwrap(r.data)),
+  stats: () =>
+    api.get<Env<StatsResponse>>("/servers/stats").then((r) => unwrap(r.data)),
+  uptime: () =>
+    api.get<Env<UptimeResponse>>("/servers/uptime").then((r) => unwrap(r.data)),
   create: (body: CreateServerInput) =>
-    api.post<Env<ServerResponse>>("/servers", body).then((r) => unwrap(r.data)),
+    api
+      .post<Env<ServerResponse>>("/servers", body, { headers: idempotencyKey() })
+      .then((r) => unwrap(r.data)),
   update: (serverId: string, body: UpdateServerInput) =>
     api.put<Env<ServerResponse>>(`/servers/${serverId}`, body).then((r) => unwrap(r.data)),
   remove: (serverId: string) =>
-    api.delete<Env<{ server_id: string; message: string }>>(`/servers/${serverId}`).then((r) => unwrap(r.data)),
+    api
+      .delete<Env<{ server_id: string; message: string }>>(`/servers/${serverId}`)
+      .then((r) => unwrap(r.data)),
 };
 
 // ── Import / Export ──
 export const fileApi = {
+  // Synchronous: the response is the full report, there is no job to poll.
   importServers: (file: File) => {
     const form = new FormData();
     form.append("file", file);
     return api
-      .post<Env<ImportJobResponse>>("/servers/import", form, {
-        headers: { "Content-Type": "multipart/form-data" },
+      .post<Env<ImportResponse>>("/servers/import", form, {
+        headers: { "Content-Type": "multipart/form-data", ...idempotencyKey() },
       })
       .then((r) => unwrap(r.data));
   },
-  importStatus: (jobId: string) =>
-    api
-      .get<Env<ImportJobStatusResponse>>(`/servers/import/${jobId}`)
-      .then((r) => unwrap(r.data)),
   exportServers: async (params: ServerListParams) => {
     const res = await api.post("/servers/export", params, { responseType: "blob" });
-    // Filename from Content-Disposition if exposed, else generated.
     const cd: string = res.headers["content-disposition"] ?? "";
     const match = cd.match(/filename="?([^"]+)"?/);
     const filename =
@@ -95,7 +105,9 @@ export const reportApi = {
       .get<Env<ReportSummary>>("/reports/summary", { params: { start_date, end_date } })
       .then((r) => unwrap(r.data)),
   send: (body: SendReportInput) =>
-    api.post<Env<SendReportResponse>>("/reports", body).then((r) => unwrap(r.data)),
+    api.post<Env<JobResponse>>("/reports", body).then((r) => unwrap(r.data)),
+  get: (id: string) =>
+    api.get<Env<JobResponse>>(`/reports/${id}`).then((r) => unwrap(r.data)),
 };
 
 // ── Users ──
@@ -108,10 +120,4 @@ export const userApi = {
     api
       .put<Env<UserProfile>>(`/auth/users/${userId}/role`, { role_name })
       .then((r) => unwrap(r.data)),
-};
-
-// ── Monitor ──
-export const monitorApi = {
-  status: () =>
-    api.get<Env<MonitorStatus>>("/monitor/status").then((r) => unwrap(r.data)),
 };

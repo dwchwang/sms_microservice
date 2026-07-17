@@ -52,8 +52,8 @@ export default function LoginPage() {
       }
     >
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-        <Field label="Tên đăng nhập" htmlFor="username" error={errors.username?.message} required>
-          <Input id="username" autoComplete="username" {...register("username")} />
+        <Field label="Email" htmlFor="email" error={errors.email?.message} required>
+          <Input id="email" type="email" autoComplete="email" {...register("email")} />
         </Field>
         <Field label="Mật khẩu" htmlFor="password" error={errors.password?.message} required>
           <Input id="password" type="password" autoComplete="current-password" {...register("password")} />

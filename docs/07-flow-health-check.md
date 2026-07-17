@@ -1,59 +1,136 @@
-# Luồng vận hành: Health-Check 10.000 Server
+# 07 — Flow: health check
 
-Đây là trái tim của hệ thống, hoạt động bền bỉ, lặp đi lặp lại không ngừng nghỉ để theo dõi "nhịp tim" của 10.000 máy chủ.
+> Từ lúc scheduler nạp round tới lúc `status` trong PostgreSQL đổi.
 
-## 0. TCP Simulator — "10.000 Server Ảo" Chạy Thật
+---
 
-Trước khi Monitor Service bắt đầu hoạt động, cần hiểu cơ chế giả lập 10.000 server:
+## 1. Toàn cảnh một round
 
-**Bài toán:** Bạn lấy đâu ra 10.000 máy chủ thật đang chạy để ping? Không có server thật → TCP luôn fail → 100% Offline → Biểu đồ vô nghĩa.
+```text
+──── t=0s ─────────────────────────────────────────────────
+Scheduler (instance thắng lock):
+  SETNX monitor:round:lock:{round_id}  TTL 120s
+  kiểm tra server:monitor-target:ready
+  SSCAN ids → RPUSH monitor:ping:queue:{round_id}   (10.000 phần tử)
+  EXPIRE queue 120s
+  SET monitor:round:current {round_id}
 
-**Giải pháp: TCP Simulator Service** — Một chương trình Go duy nhất, chạy trong Docker, quản lý 10.000 TCP listeners. Mỗi listener đại diện cho 1 "fake server".
+──── t=0..~30s ─────────────────────────────────────────────
+600 goroutine (3 instance × 200), mọi instance:
+  round = GET monitor:round:current
+  id    = BRPOP monitor:ping:queue:{round}  (timeout 1s)
+  target= HGETALL server:monitor-target:{id}   → nil thì bỏ qua (đã xóa)
+  ON/OFF, latency = TCP connect(ipv4, tcp_port)  timeout 3s
+  Lua script → 0 (cũ) | 1 (đổi) | 2 (không đổi)
+  fact → bulk buffer → ES
 
-1. Mỗi server được gán 1 port riêng (SRV-00001 → port 9001, SRV-10000 → port 19000).
-2. Cứ mỗi **30 giây**, Math Engine tính toán xem mỗi server nên ON hay OFF:
-   - Dựa trên `uptime_rate` (VD: 0.95 = 95% khả năng ON).
-   - Cộng thêm biến thiên theo hàm Sin theo giờ (tạo pattern trồi sụt ban ngày/ban đêm).
-   - Mỗi server có phase riêng (để không phải tất cả ON/OFF cùng lúc).
-3. Nếu server nên **ON** → **mở TCP port** (chấp nhận kết nối rồi đóng ngay).
-4. Nếu server nên **OFF** → **đóng TCP port** (connection refused).
+──── t=60s ─────────────────────────────────────────────────
+Round tiếp theo. Scheduler đo LLEN queue của round cũ → checks_missing.
+Queue cũ hết hạn sau 120s.
+```
 
-**Kết quả:** Monitor Service ping TCP tới `tcp-simulator:9001` — nếu port đang mở thì "à, server này ON", nếu bị refused thì "server này OFF". Monitor Service **không hề biết đây là server giả** — code TCPChecker chạy y hệt production.
+---
 
-## 1. Chuẩn bị (Trước khi chạy)
+## 2. TCP check
 
-Bộ máy `monitor-service` sở hữu một Đồng hồ đếm nhịp (Cron Scheduler) được đặt lịch cứ đúng **60 giây (1 phút)** là reo chuông một lần.
+```text
+net.DialTimeout("tcp", ipv4:tcp_port, 3s)
+  thành công → ON,  latency = thời gian connect
+  thất bại   → OFF, error_code = TIMEOUT | REFUSED | ...
+```
 
-Khi chuông reo:
-1. Nó chạy ra hỏi Redis: "Cho tôi xin cái chìa khóa (Lock)". Redis cấp khóa. Nếu có 1 bản sao `monitor-service` thứ 2 cũng chạy ra xin khóa, nó sẽ bị Redis từ chối để đảm bảo chỉ 1 người được làm việc.
-2. Nó kết nối qua Postgres (với quyền đọc chéo Schema), lấy về danh sách toàn bộ 10.000 server đang hoạt động (không bị xóa). Mỗi server có `ipv4 = "tcp-simulator"` và `tcp_port` riêng (9001–19000).
+Chỉ là **TCP connect**, không gửi payload, không đọc gì. Câu hỏi là "cổng có mở
+không", và connect trả lời đúng câu đó với chi phí thấp nhất.
 
-## 2. Quá trình "Ping" (Worker Pool)
+`MONITOR_TCP_DIAL_HOST` cho phép ghi đè IP đích để TCP Simulator trả lời thay khi dev.
 
-Thay vì 1 người chạy đi kiểm tra 10.000 nhà, `monitor-service` phái ra **100 công nhân (Workers)** làm việc song song.
+---
 
-Tất cả 10.000 servers đều được check bằng **TCP Connect thật**:
-- Công nhân sẽ gọi `net.DialTimeout("tcp", "tcp-simulator:9001", 5s)` — mở kết nối TCP thật tới TCP Simulator Service.
-- Nếu TCP Simulator đang mở port đó (server ON theo toán học): kết nối **thành công** ✅ → server được tính là **ON**.
-- Nếu TCP Simulator đã đóng port đó (server OFF theo toán học): kết nối **bị từ chối** ❌ → server bị tính là **OFF**.
-- Thời gian phản hồi (response time) cũng được đo thật (thường < 5ms trong Docker network).
+## 3. Lua script — trái tim của flow
 
-## 3. Tổng hợp và Ghi nhận Kết quả (Batch Processing)
+```text
+KEYS: monitor:status:{server_id}, stream:monitor.status
+ARGV: server_id, status, checked_at(RFC3339), latency_ms, round_id
 
-Khi 100 công nhân đã báo cáo xong toàn bộ 10.000 kết quả, hệ thống bắt đầu xử lý hậu kỳ. Đây là bước phải làm cực kỳ tối ưu để không làm "sập" Database.
+round_id <= old_round?            → return 0    (không ghi gì)
+HSET status, last_checked_at, latency_ms, round_id
+old_status == false (lần đầu)?    → XADD, return 1
+old_status ~= new_status?         → XADD, return 1
+                                    return 2    (không phát event)
+```
 
-**Bước 3.1: So sánh trạng thái**
-Hệ thống cầm 10.000 kết quả mới đi so sánh với 10.000 kết quả của phút trước (đang lưu sẵn trên RAM/Redis).
-Nó phát hiện ra: "À, 9.990 server trạng thái vẫn không đổi. Chỉ có 10 server vừa từ ON chuyển sang OFF (bị sập)".
+Năm trường hợp và kết quả:
 
-**Bước 3.2: Phát sóng sự kiện thay đổi (Alerting Foundation)**
-Với 10 server bị thay đổi trạng thái đó, nó lập tức ném 10 tin nhắn lên Kafka (kênh `server.status.changed`). Hệ thống Alert hoặc màn hình Frontend có thể nhận sự kiện này để kêu bíp bíp, chớp đỏ báo động ngay lập tức theo thời gian thực (Real-time).
+| Trường hợp | Mã |
+|---|---|
+| Check đầu tiên (`UNKNOWN → ON`) | `1` |
+| Status không đổi (`ON → ON`) | `2` |
+| Round cũ tới muộn | `0` |
+| Replay đúng round đã ghi | `0` |
+| Transition thật (`ON → OFF`) | `1` |
 
-**Bước 3.3: Cập nhật PostgreSQL cực nhẹ**
-Hệ thống tạo ra 1 câu lệnh SQL duy nhất (Batch Update) gửi xuống PostgreSQL để cập nhật chữ "on" thành "off" cho đúng 10 server bị thay đổi kia. Bỏ qua 9.990 server không đổi. Database thở phào nhẹ nhõm. Cập nhật xong, nó lưu lại trạng thái mới nhất vào Redis cho phút sau so sánh.
+Trường hợp `2` chiếm gần như toàn bộ 10.000 ping mỗi phút. Đó là lý do
+`server:list:version` đứng yên và cache sống.
 
-**Bước 3.4: Đổ Log vào Elasticsearch (Lưu trữ Big Data)**
-Mặc dù DB chỉ cập nhật 10 server, nhưng **Lịch sử nhịp tim (Log)** của cả 10.000 server đều phải được ghi lại để vẽ biểu đồ và tính Uptime.
-Hệ thống đóng gói 10.000 bản ghi này thành 1 gói hàng khổng lồ (Bulk Request), gửi 1 lần duy nhất sang Elasticsearch. Elasticsearch (công cụ chuyên trị Big Data) sẽ nuốt trọn 10.000 bản ghi này trong vài chục mili-giây và đánh index (chỉ mục) để sau này tìm kiếm siêu tốc.
+---
 
-Vòng lặp kết thúc, các công nhân nghỉ ngơi chờ chuông reo ở phút tiếp theo.
+## 4. Consumer đưa status vào PostgreSQL
+
+```text
+XREADGROUP group=server-svc consumer={hostname} ">" COUNT 100 BLOCK 2s
+  │
+  ├─ parse event → sai format? ACK rồi bỏ (kèm log Error)
+  ├─ UPDATE servers SET status=?, status_changed_at=?, status_version=?
+  │     WHERE server_id=? AND status_version < ?
+  │     ├─ RowsAffected > 0 → đánh dấu cần bump
+  │     └─ RowsAffected = 0 → event cũ hoặc server đã xóa; vẫn ACK
+  ├─ XACK cả batch
+  └─ có row đổi? → INCR server:list:version (một lần cho cả batch)
+```
+
+`XAUTOCLAIM` chạy mỗi 30s, tiếp quản message pending quá 60s của consumer đã chết.
+
+---
+
+## 5. Health fact vào Elasticsearch
+
+```text
+Fact { server_id, server_name, status, checked_at, round_id, latency_ms, error_code }
+  → FactBuffer (flush khi đủ 1000 hoặc mỗi 5s)
+  → _bulk vào index server-status-logs-YYYY.MM.DD
+      _id = "{server_id}:{round_id}"     ← tất định
+```
+
+**ES là đường nhánh.** Một lần check vẫn được tính là đã xảy ra kể cả khi fact bị mất
+— status trong Redis/PostgreSQL vẫn đúng. ES chết chỉ làm snapshot đêm nay thiếu data.
+
+`server_name` được denormalize vào fact vì Monitoring không đọc PostgreSQL, mà report
+lịch sử cần "tên tại thời điểm check" chứ không phải tên hiện tại.
+
+---
+
+## 6. Vì sao `checks_missing` quan trọng nhất
+
+```text
+checks_missing = LLEN monitor:ping:queue:{round_id}  đo lúc round kết thúc
+```
+
+Nếu worker không kịp ping hết queue trong 60s, phần dư nằm lại và biến mất cùng
+queue khi nó hết hạn. Không có metric này thì hệ thống **ping thiếu server mà không
+ai biết** — không có lỗi, không có exception, chỉ là vài server im lặng không được đo.
+
+`checks_missing > 0` liên tục = thêm worker hoặc thêm instance.
+
+---
+
+## 7. Bảng lỗi
+
+| Tình huống | Hành vi | Nhìn thấy ở đâu |
+|---|---|---|
+| Thiếu marker `ready` | Bỏ qua cả round | Log Warn + `targets_expected` = 0 |
+| Server bị xóa giữa round | Bỏ qua im lặng | — |
+| `tcp_port` trong hash hỏng | Lỗi cho riêng target đó | Log Error |
+| Redis chết | Worker backoff 1s rồi thử lại | Log Error |
+| ES chết | Buffer giữ rồi drop khi đầy | `es_bulk_failure`, coverage giảm |
+| Mất consumer group | Tự tạo lại tại `0`, replay | Log Warn (~4s) |
+| `changed_at` sai format | **ACK rồi vứt im lặng** | Chỉ có log Error |

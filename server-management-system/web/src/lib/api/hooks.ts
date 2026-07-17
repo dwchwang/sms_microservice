@@ -8,7 +8,6 @@ import {
 } from "@tanstack/react-query";
 import {
   fileApi,
-  monitorApi,
   reportApi,
   serverApi,
   userApi,
@@ -36,11 +35,32 @@ export function useServer(serverId: string) {
   });
 }
 
+// One cached call instead of three list queries.
+export function useServerStats(options?: { refetchInterval?: number }) {
+  return useQuery({
+    queryKey: ["server-stats"],
+    queryFn: () => serverApi.stats(),
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
+// Lifetime uptime from Redis counters — no snapshot, answers immediately.
+export function useServerUptime(options?: { refetchInterval?: number }) {
+  return useQuery({
+    queryKey: ["server-uptime"],
+    queryFn: () => serverApi.uptime(),
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
 export function useCreateServer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: serverApi.create,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["servers"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["servers"] });
+      qc.invalidateQueries({ queryKey: ["server-stats"] });
+    },
   });
 }
 
@@ -60,23 +80,21 @@ export function useDeleteServer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (serverId: string) => serverApi.remove(serverId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["servers"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["servers"] });
+      qc.invalidateQueries({ queryKey: ["server-stats"] });
+    },
   });
 }
 
-// ── Import / Export ──
+// ── Import ──
 export function useImportServers() {
-  return useMutation({ mutationFn: (file: File) => fileApi.importServers(file) });
-}
-
-export function useImportJob(jobId: string | null) {
-  return useQuery({
-    queryKey: ["import-job", jobId],
-    queryFn: () => fileApi.importStatus(jobId as string),
-    enabled: !!jobId,
-    refetchInterval: (query) => {
-      const s = query.state.data?.status;
-      return s === "pending" || s === "processing" ? 2000 : false;
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => fileApi.importServers(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["servers"] });
+      qc.invalidateQueries({ queryKey: ["server-stats"] });
     },
   });
 }
@@ -87,6 +105,7 @@ export function useReportSummary(start: string, end: string, enabled: boolean) {
     queryKey: ["report-summary", start, end],
     queryFn: () => reportApi.summary(start, end),
     enabled: enabled && !!start && !!end,
+    retry: false,
   });
 }
 
@@ -109,15 +128,5 @@ export function useUpdateUserRole() {
     mutationFn: ({ userId, role }: { userId: string; role: string }) =>
       userApi.updateRole(userId, role),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
-  });
-}
-
-// ── Monitor ──
-export function useMonitorStatus() {
-  return useQuery({
-    queryKey: ["monitor-status"],
-    queryFn: () => monitorApi.status(),
-    retry: false,
-    refetchInterval: 30000,
   });
 }

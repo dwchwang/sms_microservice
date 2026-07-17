@@ -2,16 +2,14 @@
 
 import { useState } from "react";
 import { format, subDays } from "date-fns";
-import { Mail, BarChart3, RefreshCw } from "lucide-react";
-import { useReportSummary } from "@/lib/api/hooks";
+import { Mail, RefreshCw } from "lucide-react";
+import { useServerUptime } from "@/lib/api/hooks";
 import { Can } from "@/components/common/can";
 import { PageHeader } from "@/components/common/page-header";
 import { KpiCard } from "@/components/common/kpi-card";
 import { EmptyState } from "@/components/common/empty-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Field } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -21,68 +19,54 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { OnOffDonut, LowUptimeBar } from "@/components/reports/charts";
+import { StatusDonut, UptimeDistributionDonut, LowUptimeBar } from "@/components/reports/charts";
 import { SendReportDialog } from "@/components/reports/send-report-dialog";
 
-const TODAY = format(new Date(), "yyyy-MM-dd");
-const WEEK_AGO = format(subDays(new Date(), 6), "yyyy-MM-dd");
+const REFRESH_MS = 60_000;
+
+// The email report covers whole finished days; the dashboard below is live.
+const YESTERDAY = format(subDays(new Date(), 1), "yyyy-MM-dd");
+const WEEK_AGO = format(subDays(new Date(), 7), "yyyy-MM-dd");
+
+const numberFmt = new Intl.NumberFormat("vi-VN");
+
+function pct(v: number) {
+  return `${v.toFixed(2)}%`;
+}
 
 export default function ReportsPage() {
-  const [start, setStart] = useState(WEEK_AGO);
-  const [end, setEnd] = useState(TODAY);
-  const [applied, setApplied] = useState({ start: WEEK_AGO, end: TODAY });
   const [sendOpen, setSendOpen] = useState(false);
+  const { data, isLoading, isFetching, isError, error, refetch, dataUpdatedAt } =
+    useServerUptime({ refetchInterval: REFRESH_MS });
 
-  const { data, isLoading, isFetching, isError, error, refetch, dataUpdatedAt } = useReportSummary(
-    applied.start,
-    applied.end,
-    true,
-  );
-  const lowUptime = data?.low_uptime_servers ?? [];
-  const lastUpdated = dataUpdatedAt ? format(new Date(dataUpdatedAt), "HH:mm:ss") : null;
+  const top = data?.top_10_lowest_uptime ?? [];
+  const lastUpdated = dataUpdatedAt ? format(new Date(dataUpdatedAt), "HH:mm:ss") : "—";
 
   return (
     <div>
       <PageHeader
-        title="Báo cáo uptime"
-        description="Thống kê trạng thái & uptime server theo khoảng thời gian."
+        title="Dashboard uptime"
+        description="Uptime luỹ kế từ lúc mỗi server bắt đầu được giám sát, cập nhật mỗi phút."
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs text-mute">Cập nhật {lastUpdated}</span>
             <Button
               variant="secondary"
               onClick={() => refetch()}
               disabled={isFetching}
-              aria-label="Làm mới dữ liệu báo cáo"
+              aria-label="Làm mới dữ liệu"
             >
               <RefreshCw className={isFetching ? "animate-spin" : undefined} />
               Làm mới
             </Button>
             <Can scope="report:send">
               <Button onClick={() => setSendOpen(true)}>
-                <Mail /> Gửi qua email
+                <Mail /> Gửi báo cáo qua email
               </Button>
             </Can>
           </div>
         }
       />
-
-      {/* Date range */}
-      <Card className="mb-6 p-4">
-        <div className="flex flex-wrap items-end gap-3">
-          <Field label="Từ ngày">
-            <Input type="date" value={start} max={end} onChange={(e) => setStart(e.target.value)} />
-          </Field>
-          <Field label="Đến ngày">
-            <Input type="date" value={end} min={start} max={TODAY} onChange={(e) => setEnd(e.target.value)} />
-          </Field>
-          <Button variant="secondary" onClick={() => setApplied({ start, end })}>
-            <BarChart3 /> Xem báo cáo
-          </Button>
-          {lastUpdated ? (
-            <p className="pb-2 text-xs text-mute">Cập nhật lần cuối: {lastUpdated}</p>
-          ) : null}
-        </div>
-      </Card>
 
       {isLoading ? (
         <div className="space-y-4">
@@ -96,48 +80,79 @@ export default function ReportsPage() {
         </div>
       ) : isError || !data ? (
         <EmptyState
-          title="Không tải được báo cáo"
-          description={error?.message ?? "Kiểm tra khoảng ngày hoặc thử lại sau."}
+          title="Không tải được dữ liệu"
+          description={error?.message ?? "Thử lại sau."}
         />
       ) : (
         <div className="space-y-6">
-          {/* KPIs */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <KpiCard label="Tổng server" value={data.total_servers?.toLocaleString("vi-VN") ?? "—"} />
-            <KpiCard label="On" value={data.servers_on?.toLocaleString("vi-VN") ?? "—"} accent="success" />
-            <KpiCard label="Off" value={data.servers_off?.toLocaleString("vi-VN") ?? "—"} accent="mute" />
+            <KpiCard label="Tổng server" value={numberFmt.format(data.total_servers)} />
+            <KpiCard
+              label="Đang On"
+              value={numberFmt.format(data.servers_on)}
+              hint="Trạng thái hiện tại"
+              accent="success"
+            />
+            <KpiCard
+              label="Đang Off"
+              value={numberFmt.format(data.servers_off)}
+              hint="Trạng thái hiện tại"
+              accent="mute"
+            />
             <KpiCard
               label="Uptime trung bình"
-              value={typeof data.avg_uptime_pct === "number" ? `${data.avg_uptime_pct.toFixed(2)}%` : "—"}
-              hint={`${(data.total_checks ?? 0).toLocaleString("vi-VN")} lượt check`}
-              accent={data.avg_uptime_pct < 95 ? "warning" : "ink"}
+              value={data.avg_uptime_pct === null ? "—" : pct(data.avg_uptime_pct)}
+              hint={
+                data.servers_no_data > 0
+                  ? `${numberFmt.format(data.servers_no_data)} server chưa có dữ liệu`
+                  : "Trên toàn bộ server đã đo"
+              }
+              accent={
+                data.avg_uptime_pct !== null && data.avg_uptime_pct < 95 ? "warning" : "ink"
+              }
             />
           </div>
 
-          {/* Charts */}
-          <div className="grid gap-4 lg:grid-cols-3">
+          <div className="grid gap-4 lg:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>Tỉ lệ On / Off hiện tại</CardTitle>
+                <CardTitle>Trạng thái hiện tại</CardTitle>
               </CardHeader>
               <CardContent>
-                <OnOffDonut on={data.servers_on ?? 0} off={data.servers_off ?? 0} />
+                <StatusDonut
+                  on={data.servers_on}
+                  off={data.servers_off}
+                  unknown={data.servers_unknown}
+                />
               </CardContent>
             </Card>
-            <Card className="lg:col-span-2">
+            <Card>
               <CardHeader>
-                <CardTitle>Uptime — server thấp nhất</CardTitle>
+                <CardTitle>Phân bố uptime luỹ kế</CardTitle>
               </CardHeader>
               <CardContent>
-                <LowUptimeBar data={lowUptime} />
+                <UptimeDistributionDonut
+                  full={data.servers_uptime_100}
+                  partial={data.servers_uptime_partial}
+                  zero={data.servers_uptime_0}
+                  noData={data.servers_no_data}
+                />
               </CardContent>
             </Card>
           </div>
 
-          {/* Low uptime table */}
           <Card>
             <CardHeader>
-              <CardTitle>Chi tiết server uptime thấp</CardTitle>
+              <CardTitle>Top 10 server uptime thấp nhất</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <LowUptimeBar data={top} />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Chi tiết</CardTitle>
             </CardHeader>
             <CardContent className="pt-0">
               <Table>
@@ -145,18 +160,18 @@ export default function ReportsPage() {
                   <TableRow>
                     <TableHead>Server ID</TableHead>
                     <TableHead>Tên</TableHead>
-                    <TableHead className="text-right">On / Tổng</TableHead>
+                    <TableHead className="text-right">On / Tổng check</TableHead>
                     <TableHead className="text-right">Uptime</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {lowUptime.length ? (
-                    lowUptime.map((r) => (
+                  {top.length ? (
+                    top.map((r) => (
                       <TableRow key={r.server_id}>
                         <TableCell className="font-mono text-ink">{r.server_id}</TableCell>
                         <TableCell>{r.server_name}</TableCell>
                         <TableCell className="text-right font-mono text-mute">
-                          {r.on_checks?.toLocaleString("vi-VN")} / {r.total_checks?.toLocaleString("vi-VN")}
+                          {numberFmt.format(r.on_checks)} / {numberFmt.format(r.total_checks)}
                         </TableCell>
                         <TableCell
                           className={`text-right font-mono font-medium ${
@@ -167,14 +182,14 @@ export default function ReportsPage() {
                                 : "text-ink"
                           }`}
                         >
-                          {r.uptime_pct.toFixed(2)}%
+                          {pct(r.uptime_pct)}
                         </TableCell>
                       </TableRow>
                     ))
                   ) : (
                     <TableRow>
                       <TableCell colSpan={4} className="py-8 text-center text-mute">
-                        Không có server uptime thấp 🎉
+                        Chưa có server nào được check
                       </TableCell>
                     </TableRow>
                   )}
@@ -188,8 +203,8 @@ export default function ReportsPage() {
       <SendReportDialog
         open={sendOpen}
         onOpenChange={setSendOpen}
-        defaultStart={applied.start}
-        defaultEnd={applied.end}
+        defaultStart={WEEK_AGO}
+        defaultEnd={YESTERDAY}
       />
     </div>
   );

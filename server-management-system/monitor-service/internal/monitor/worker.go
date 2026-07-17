@@ -41,13 +41,14 @@ type Pool struct {
 	ops     RedisOps
 	pinger  Pinger
 	facts   FactSink
+	metrics *Metrics
 	workers int
 	log     zerolog.Logger
 }
 
-// NewPool creates a Pool of the given size.
-func NewPool(ops RedisOps, pinger Pinger, facts FactSink, workers int, log zerolog.Logger) *Pool {
-	return &Pool{ops: ops, pinger: pinger, facts: facts, workers: workers, log: log}
+// NewPool creates a Pool of the given size. metrics may be nil.
+func NewPool(ops RedisOps, pinger Pinger, facts FactSink, metrics *Metrics, workers int, log zerolog.Logger) *Pool {
+	return &Pool{ops: ops, pinger: pinger, facts: facts, metrics: metrics, workers: workers, log: log}
 }
 
 // Run blocks until ctx is cancelled.
@@ -124,6 +125,13 @@ func (p *Pool) check(ctx context.Context, serverID string, round int64) {
 		status = statusON
 	}
 	checkedAt := time.Now().UTC()
+
+	if p.metrics != nil {
+		p.metrics.ChecksCompleted.Inc()
+		if up {
+			p.metrics.TCPLatency.Observe(float64(latency) / 1000)
+		}
+	}
 
 	// RFC3339 is the contract Server Service parses for both changed_at on the
 	// stream and last_checked_at on the status hash.

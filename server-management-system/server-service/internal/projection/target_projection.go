@@ -15,6 +15,11 @@ const (
 	targetIDsKey    = "server:monitor-target:ids"
 	targetReadyKey  = "server:monitor-target:ready"
 
+	// Written by Monitoring, cleared here: a deleted server must leave the uptime
+	// index, or it keeps scoring in the dashboard and the worst-10 forever.
+	statusKeyPrefix = "monitor:status:"
+	uptimeIndexKey  = "monitor:uptime:index"
+
 	rebuildPageSize = 1000
 )
 
@@ -44,6 +49,7 @@ type targetOps interface {
 	HSet(ctx context.Context, key string, values ...any) error
 	SAdd(ctx context.Context, key string, members ...any) error
 	SRem(ctx context.Context, key string, members ...any) error
+	ZRem(ctx context.Context, key string, members ...any) error
 	Del(ctx context.Context, keys ...string) error
 	WriteTargets(ctx context.Context, idsKey string, targets []Target) error
 	Rename(ctx context.Context, src, dst string) error
@@ -66,6 +72,10 @@ func (r *redisTargetOps) SAdd(ctx context.Context, key string, members ...any) e
 
 func (r *redisTargetOps) SRem(ctx context.Context, key string, members ...any) error {
 	return r.client.SRem(ctx, key, members...).Err()
+}
+
+func (r *redisTargetOps) ZRem(ctx context.Context, key string, members ...any) error {
+	return r.client.ZRem(ctx, key, members...).Err()
 }
 
 func (r *redisTargetOps) Del(ctx context.Context, keys ...string) error {
@@ -139,6 +149,12 @@ func (p *targetProjection) Delete(ctx context.Context, serverID string) error {
 	}
 	if err := p.ops.Del(ctx, targetKey(serverID)); err != nil {
 		return fmt.Errorf("failed to delete target hash for %s: %w", serverID, err)
+	}
+	if err := p.ops.ZRem(ctx, uptimeIndexKey, serverID); err != nil {
+		return fmt.Errorf("failed to remove %s from the uptime index: %w", serverID, err)
+	}
+	if err := p.ops.Del(ctx, statusKeyPrefix+serverID); err != nil {
+		return fmt.Errorf("failed to delete monitor status for %s: %w", serverID, err)
 	}
 	return nil
 }

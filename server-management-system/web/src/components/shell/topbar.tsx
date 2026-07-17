@@ -7,7 +7,6 @@ import { toast } from "sonner";
 import { authApi } from "@/lib/api/endpoints";
 import { useAuth } from "@/providers/auth-provider";
 import { useAuthStore } from "@/store/auth";
-import { useMonitorStatus } from "@/lib/api/hooks";
 import { SidebarNav } from "./sidebar";
 import { RoleBadge } from "@/components/common/status-pill";
 import {
@@ -18,20 +17,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-
-function MonitorDot() {
-  const { data, isError } = useMonitorStatus();
-  const ok = !isError && data?.status === "ok" && data?.redis_available !== false;
-  return (
-    <span
-      title={isError ? "Monitor: không truy cập được" : `Monitor: ${data?.status ?? "..."}`}
-      className="flex items-center gap-1.5 rounded-full border border-hairline px-2.5 py-1 text-xs text-body"
-    >
-      <span className={`size-1.5 rounded-full ${ok ? "bg-link" : "bg-mute"}`} />
-      Monitor
-    </span>
-  );
-}
 
 export function Topbar() {
   const router = useRouter();
@@ -66,14 +51,13 @@ export function Topbar() {
       </div>
 
       <div className="flex items-center gap-3">
-        <MonitorDot />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="flex items-center gap-2 rounded-sm px-2 py-1 hover:bg-canvas-soft-2">
               <span className="grid size-7 place-items-center rounded-full bg-primary text-xs font-medium text-on-primary">
-                {user?.username?.[0]?.toUpperCase() ?? "?"}
+                {user?.full_name?.[0]?.toUpperCase() ?? "?"}
               </span>
-              <span className="hidden text-sm text-ink sm:inline">{user?.username}</span>
+              <span className="hidden text-sm text-ink sm:inline">{user?.email}</span>
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">

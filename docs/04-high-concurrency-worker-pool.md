@@ -1,81 +1,152 @@
-# Pattern Đồng thời cao (High-Concurrency): Worker Pool & Distributed Lock
+# 04 — Concurrency: round, worker pool, sizing
 
-Điểm ăn tiền nhất và cũng khó nhất của bài toán (2.0 điểm) là: **Kiểm tra trạng thái (Health Check) 10.000 server định kỳ mỗi phút**.
+> Bài toán: ping **10.000 server mỗi 60 giây**, TCP timeout 3s, nhiều instance chạy
+> song song mà không dẫm chân nhau.
 
-Nếu code không khéo, việc mở 10.000 kết nối TCP cùng 1 lúc sẽ làm cạn kiệt tài nguyên máy chủ (socket exhaustion, OOM), hoặc mất quá 1 phút mới quét xong, dẫn tới job bị chồng chéo.
+---
 
-Dưới đây là cách VCS-SMS giải quyết bài toán này.
-
-## 1. Pattern Worker Pool trong Golang
-
-Golang có `Goroutine` rất nhẹ, bạn có thể `go checkServer()` 10.000 lần một lúc. Tuy nhiên, việc bung (fan-out) quá nhiều goroutine đồng thời có thể gây sốc cho network interface card (NIC) và CPU context switching.
-
-**Giải pháp: Worker Pool**
-Thay vì mở 10.000 luồng, chúng ta chỉ tạo cố định một nhóm công nhân (Worker Pool) gồm **100 goroutines**.
-- Ta có một băng chuyền (Channel trong Go) tên là `jobs`. Ta thả 10.000 server vào băng chuyền này.
-- 100 công nhân sẽ liên tục đứng chực ở băng chuyền. Ai rảnh thì lấy 1 server ra ping. Ping xong lại lấy tiếp.
-- Cứ như vậy, tại bất kỳ thời điểm nào, cũng chỉ có tối đa 100 kết nối TCP đang mở. Tài nguyên được kiểm soát chặt chẽ (Throttling).
+## 1. Round là gì
 
 ```text
-               /-- Worker 1 --\ 
-10.000 Servers --- Worker 2 --- (xử lý TCP/Simulator) ---> [Kết quả Channel]
-(Channel jobs) \-- Worker N --/
+round_id = redis_time_unix / 60
 ```
 
-Với timeout TCP là 5 giây. Trong trường hợp xấu nhất toàn bộ server đều sập (chờ đủ 5s mới fail):
-1 Worker xử lý được 60s / 5s = 12 servers/phút.
-100 Workers xử lý được 100 * 12 = 1.200 servers/phút (Vẫn chưa đủ nếu timeout liên tục).
-Thực tế, kết nối thành công hoặc lỗi rớt mạng thường trả về trong <100ms. Nhưng để an toàn cho 10.000 servers, hệ thống cho phép cấu hình số lượng worker qua `.env` (ví dụ tăng lên 500 workers).
+Mỗi phút là một round có ID xác định. Ba tính chất quan trọng:
 
-## 2. Distributed Lock (Khóa phân tán) với Redis
+**Lấy từ Redis TIME, không phải `time.Now()`.** Nhiều instance mà dùng đồng hồ máy
+thì lệch nhau vài giây là đã tính ra `round_id` khác nhau → nạp/đọc queue khác nhau
+→ vỡ toàn bộ cơ chế. Redis là đồng hồ chung.
 
-Hệ thống được thiết kế Microservice, tức là bạn có thể chạy 3 instances của `monitor-service` cùng lúc để tăng tính sẵn sàng (High Availability).
-Tuy nhiên, cả 3 instances đều có Scheduler Cron job kích hoạt mỗi phút một lần. Nếu không cẩn thận, cả 3 sẽ cùng quét 10.000 server, tạo ra 30.000 kết nối -> Dư thừa và sai lệch dữ liệu log.
+**`RoundSeconds` là hằng số, không phải config.** Hai instance cấu hình khác nhau sẽ
+cho `round_id` không thống nhất. Đây là lý do `MONITOR_CHECK_INTERVAL` bị bỏ khỏi `.env`.
 
-**Giải pháp: Redis Distributed Lock**
-Trước khi thực hiện vòng quét định kỳ, service phải "giành quyền" thực thi bằng cách tạo một chìa khóa (Key) trong Redis.
+**Scheduler neo vào ranh giới round, không dùng ticker cố định.** Mỗi vòng nó đọc lại
+Redis TIME và ngủ tới ranh giới kế tiếp. Ticker cố định sẽ chạy theo pha lúc process
+boot — queue nạp giữa chừng round, và một tick trễ >60s làm Go bỏ tick, mất nguyên một
+round mà `checks_missing` không thấy vì queue chưa từng tồn tại.
 
-1. Instance A tới Redis nói: "Cho tôi tạo key `health-check-lock` với TTL 90 giây". Redis trả lời: "OK, key chưa tồn tại, anh được phép chạy".
-2. Cùng lúc đó, Instance B tới Redis đòi tạo key `health-check-lock`. Redis trả lời: "Key đã có chủ (bị khóa), anh không được phép chạy".
-3. Instance B sẽ bỏ qua vòng quét lần này, đi ngủ. Chỉ 1 mình Instance A quét 10.000 servers.
+---
 
-Khóa có **TTL (Time to Live) 90 giây**. Nếu Instance A đang quét dở bị crash (cúp điện), sau 90 giây khóa sẽ tự bốc hơi. Phút tiếp theo Instance B sẽ có thể giành quyền quét tiếp. Đây là cơ chế tránh Deadlock (khóa vĩnh viễn).
-
-## 3. TCP Simulator Pool: Giả lập 10.000 Server Thật
-
-Vấn đề thực tế khi làm bài: Bạn lấy đâu ra 10.000 IP thật đang sống để test? Nếu toàn IP ảo, kết nối TCP sẽ luôn bị timeout, hệ thống sẽ chậm và kết quả 100% Offline (chẳng có gì thú vị để vẽ biểu đồ báo cáo).
-
-**Giải pháp: TCP Simulator Pool**
-Thay vì sử dụng 2 mode riêng biệt (TCP cho thật, Simulator cho giả lập), VCS-SMS kết hợp cả hai thành **một giải pháp thống nhất**:
-
-1. **TCP Simulator Service** (`tcp-simulator`): Một chương trình Go duy nhất, chạy trong Docker, quản lý **10.000 TCP listeners** — mỗi listener đại diện cho 1 "fake server".
-2. **Math Engine**: Cứ mỗi **30 giây**, Math Engine tính toán xem mỗi server nên ở trạng thái ON hay OFF dựa trên:
-   - `uptime_rate` (VD: 0.95 = 95% khả năng ON)
-   - Biến thiên hàm Sin theo giờ trong ngày (tạo pattern trồi sụt realistic)
-   - Offset riêng cho mỗi server (để không phải tất cả cùng ON/OFF 1 lúc)
-3. **Mở/Đóng Port Động**: Nếu server nên ON → mở TCP port (chấp nhận kết nối rồi đóng ngay). Nếu server nên OFF → đóng TCP port (connection refused).
-4. **Monitor Service dùng TCP Connect thật**: `net.DialTimeout("tcp", "tcp-simulator:9001", 5s)`. Port mở = ON ✅. Port đóng = OFF ❌.
-
-**Tại sao cách này ưu việt hơn?**
-- Monitor Service chạy **y hệt production** — code TCPChecker không hề biết đây là server giả. Nó chỉ biết: "Ping TCP thành công thì ON, thất bại thì OFF".
-- Test được toàn bộ: worker pool, timeout handling, error handling, batch write Elasticsearch.
-- Trạng thái On/Off vẫn có pattern trồi sụt realistic nhờ công thức toán học.
-- Chỉ thêm **1 container** (~100-256MB RAM) thay vì 10.000 containers.
+## 2. Scheduler và worker pool
 
 ```text
-                                    TCP Simulator Service
-                                   ┌────────────────────┐
-                /-- Worker 1 --\    │  Port 9001: OPEN ✅ │
-10.000 Servers --- Worker 2 --- ──▶│  Port 9002: CLOSED❌│
-(Channel jobs) \-- Worker N --/    │  Port 9003: OPEN ✅ │
-                                   │  ...                │
-   Monitor Service                 │  Math Engine: mỗi  │
-   (100 Workers, TCP Connect)      │  30s tính On/Off   │
-                                   └────────────────────┘
+Mỗi instance chạy CẢ HAI:
+
+Scheduler (mỗi round):
+  SETNX monitor:round:lock:{round_id}   ← chỉ 1 instance thắng
+  thua lock → không làm gì, bình thường
+  thắng lock:
+    kiểm tra server:monitor-target:ready   ← thiếu marker → BỎ QUA round
+    SSCAN server:monitor-target:ids → RPUSH monitor:ping:queue:{round_id}
+    EXPIRE queue 120s
+    SET monitor:round:current {round_id}   ← đặt CUỐI CÙNG
+
+Worker pool (200 goroutine, MỌI instance):
+  vòng lặp: đọc monitor:round:current → BRPOP queue của round đó
 ```
 
-## 4. Ghi lô lớn (Bulk Index) vào Elasticsearch
+**Lock chỉ dành cho scheduler. Mọi instance đều ping.** Thua lock không có nghĩa là
+ngồi không — worker của instance đó vẫn `BRPOP` từ queue mà instance thắng đã nạp.
+Đây là cách công việc tự chia đều: ai rảnh thì pop.
 
-Sau khi thu được 10.000 kết quả, ta không gọi Database 10.000 lần.
-Ta gom chúng thành 1 mảng (Batch) và gửi 1 request duy nhất tới Elasticsearch gọi là **Bulk API**.
-Đồng thời, ghi đè 10.000 trạng thái hiện tại (Current Status) vào Redis bằng pipeline, giúp cho API xem danh sách server lấy trạng thái cực nhanh. PG Database chỉ được gọi `Batch Update` cho những server nào THỰC SỰ THAY ĐỔI trạng thái so với phút trước (VD: đang ON tự nhiên OFF) để tiết kiệm I/O.
+**`SET monitor:round:current` đặt cuối cùng** để worker nhìn thấy round mới là chắc
+chắn tìm được queue đã nạp xong.
+
+**Worker không nhớ round.** Mỗi vòng lặp nó đọc lại `current`. Round mới bắt đầu thì
+vòng sau nó pop từ queue mới, còn queue cũ tự hết hạn. Đó là toàn bộ cơ chế chuyển round.
+
+### Marker `ready`
+
+Monitoring **bỏ qua mọi round** nếu thiếu `server:monitor-target:ready`. Marker này
+chỉ do lệnh rebuild đặt. Vì vậy: **sau khi seed hoặc khôi phục dữ liệu, luôn chạy
+`make rebuild-cache`**, nếu không Monitor sẽ không ping gì cả.
+
+---
+
+## 3. Sizing worker
+
+```text
+Mỗi check tốn tối đa 3s (TCP timeout).
+Một goroutine làm được 60s / 3s = 20 check mỗi round.
+10.000 server / 20 = 500 goroutine.
++20% headroom → 600 goroutine → 3 instance × 200 goroutine.
+```
+
+**"Worker" ở đây là goroutine, không phải process hay container.** 200 goroutine chờ
+I/O trong một process Go là chuyện bình thường — mỗi goroutine chỉ tốn vài KB stack.
+Hệ thống **không** cần 500 container.
+
+### Redis pool phải phủ hết số worker
+
+`BRPOP` **giữ connection suốt thời gian block**. Nếu pool nhỏ hơn số worker thì:
+
+- Số worker chạy thật bị chặn ở kích thước pool, không phải `MONITOR_WORKER_COUNT`.
+- Scheduler phải xếp hàng sau worker cho **từng** lệnh SSCAN/RPUSH → nạp queue chậm hàng chục giây.
+
+go-redis mặc định `PoolSize = 10 × GOMAXPROCS` (= 80 trên máy 8 CPU) — **nhỏ hơn 200**.
+Code đặt `PoolSize = worker + 16`, phần dư dành cho scheduler, sampler và fact buffer.
+
+### Số đo thật (10.001 server, 1 instance, 200 goroutine)
+
+| Chỉ số | Giá trị |
+|---|---|
+| `round_duration` trung bình | **3,5s** (ngân sách 60s) |
+| `checks_missing` | 0 |
+| `tcp_latency` trung bình | 4,3ms |
+| Rebuild projection | 1,7s |
+
+Công thức 600 goroutine là **cận trên xấu nhất**, giả định mọi check tốn trọn 3s timeout.
+Khi server trả lời bình thường (~4ms), 200 goroutine trên 1 instance đã thừa. Con số 600
+vẫn đúng cho tình huống phần lớn server chết.
+
+---
+
+## 4. Bảy metric bắt buộc
+
+Monitor expose `/metrics` (Prometheus) trên port nội bộ 8083.
+
+| Metric | Ý nghĩa |
+|---|---|
+| `vcs_monitor_round_duration_seconds` | Thời gian từ lúc round bắt đầu tới khi queue cạn |
+| `vcs_monitor_targets_expected` | Số target scheduler nạp vào queue |
+| `vcs_monitor_checks_completed_total` | Số ping instance này hoàn thành |
+| **`vcs_monitor_checks_missing`** | **`LLEN` queue đo lúc round kết thúc — việc chưa kịp ping** |
+| `vcs_monitor_queue_depth` | Độ sâu queue hiện tại |
+| `vcs_monitor_tcp_latency_seconds` | Histogram độ trễ TCP connect |
+| `vcs_monitor_es_bulk_failure_total` | Số batch bulk bị bỏ sau khi retry hết |
+
+**`checks_missing` là tín hiệu duy nhất báo thiếu worker.** Không có nó, hệ thống ping
+thiếu server mà không ai biết. `checks_missing > 0` liên tục = cần thêm worker hoặc
+thêm instance.
+
+---
+
+## 5. Bulk buffer có giới hạn
+
+```text
+flushSize     1000 fact
+flushInterval 5s
+capacity      MONITOR_FACT_CAPACITY (mặc định 50.000)
+retry         3 lần, backoff tăng dần
+```
+
+Buffer **có trần**. ES outage kéo dài thì nó **drop fact** chứ không phình tới lúc
+process chết. Report sẽ hiển thị coverage giảm — chuyện đó khắc phục được; OOM thì không.
+
+> **Lỗi thầm lặng đã sửa:** `_bulk` của Elasticsearch trả **HTTP 200 kể cả khi từng
+> document bị từ chối** (ví dụ `429 es_rejected_execution_exception` lúc tải cao — đúng
+> kịch bản 10.000 server). Chỉ xét HTTP status thì fact biến mất không dấu vết và
+> retry không bao giờ chạy. Code hiện đọc cờ `errors` trong body và trả lỗi để retry
+> hoạt động — `_id` tất định đảm bảo retry không nhân bản document.
+
+---
+
+## 6. Tính đúng đắn dưới song song
+
+| Rủi ro | Vì sao không thành vấn đề |
+|---|---|
+| `SSCAN` trả trùng phần tử | Server bị ping 2 lần trong round → Lua trả `0` (round không lớn hơn) và ES ghi đè cùng `_id`. Vô hại. |
+| Hai instance cùng pop một server | `BRPOP` là atomic — chỉ một bên nhận được |
+| Server bị xóa giữa round | `GetTarget` trả nil → bỏ qua |
+| Ping xong nhưng round đã qua | Lua so `round_id` → trả `0`, không ghi |
+| Instance chết giữa round | Việc còn lại nằm trong queue, instance khác pop tiếp |

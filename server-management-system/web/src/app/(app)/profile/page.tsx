@@ -47,11 +47,11 @@ export default function ProfilePage() {
       <Card className="p-6">
         <div className="mb-4 flex items-center gap-4">
           <span className="grid size-14 place-items-center rounded-full bg-primary text-lg font-medium text-on-primary">
-            {user.username[0]?.toUpperCase()}
+            {user.full_name[0]?.toUpperCase()}
           </span>
           <div>
             <p className="display-sm text-ink">{user.full_name}</p>
-            <p className="text-sm text-body">@{user.username}</p>
+            <p className="text-sm text-body">{user.email}</p>
           </div>
           <div className="ml-auto">
             <RoleBadge role={user.role} />

@@ -3,6 +3,29 @@ http:
   # Middlewares
   # ============================================
   middlewares:
+    # CORS. Phải đứng TRƯỚC forward-auth trong chuỗi: preflight OPTIONS không mang
+    # Authorization, nên forward-auth sẽ trả 401 và trình duyệt chặn mọi request.
+    # Traefik trả lời preflight ngay tại đây, không forward xuống service.
+    cors:
+      headers:
+        accessControlAllowOriginList:
+          - "http://localhost:3000"
+        accessControlAllowMethods:
+          - "GET"
+          - "POST"
+          - "PUT"
+          - "DELETE"
+          - "OPTIONS"
+        accessControlAllowHeaders:
+          - "Authorization"
+          - "Content-Type"
+          - "Idempotency-Key"
+        # Export đọc tên file từ header này.
+        accessControlExposeHeaders:
+          - "Content-Disposition"
+        accessControlMaxAge: 3600
+        addVaryHeader: true
+
     # ForwardAuth -> Identity Service
     forward-auth:
       forwardAuth:
@@ -31,14 +54,12 @@ http:
   # Routers
   # ============================================
   routers:
-    # Import is synchronous and may run ~8s for 10.000 rows, so it gets its own
-    # transport with a longer header timeout. Path() outranks the PathPrefix
-    # rule below, so this wins for the import URL only.
     server-import:
       rule: "Path(`/api/v1/servers/import`)"
       priority: 100
       service: server-service-import
       middlewares:
+        - cors
         - forward-auth
         - rate-limit-global
 
@@ -46,6 +67,7 @@ http:
       rule: "PathPrefix(`/api/v1/servers`)"
       service: server-service
       middlewares:
+        - cors
         - forward-auth
         - rate-limit-global
 
@@ -53,6 +75,7 @@ http:
       rule: "PathPrefix(`/api/v1/reports`)"
       service: report-service
       middlewares:
+        - cors
         - forward-auth
         - rate-limit-global
 
@@ -60,6 +83,7 @@ http:
       rule: "PathPrefix(`/api/v1/auth`)"
       service: auth-service
       middlewares:
+        - cors
         - rate-limit-auth
 
   # ============================================

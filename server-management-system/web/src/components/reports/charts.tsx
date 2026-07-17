@@ -25,14 +25,22 @@ const HAIRLINE = "#ebebeb";
 
 const numberFmt = new Intl.NumberFormat("vi-VN");
 
-export function OnOffDonut({ on, off }: { on: number; off: number }) {
+// Current ON/OFF/UNKNOWN. UNKNOWN is its own slice: never checked is not Off.
+export function StatusDonut({
+  on,
+  off,
+  unknown,
+}: {
+  on: number;
+  off: number;
+  unknown: number;
+}) {
   const data = [
-    { name: "On", value: on, color: LINK },
-    { name: "Off", value: off, color: MUTE },
+    { name: "On", value: on, color: LINK, dot: "bg-link" },
+    { name: "Off", value: off, color: ERR, dot: "bg-error" },
+    { name: "Chưa rõ", value: unknown, color: MUTE, dot: "bg-hairline-strong" },
   ];
-  const total = on + off;
-  const onPct = total ? (on / total) * 100 : 0;
-  const offPct = total ? (off / total) * 100 : 0;
+  const total = on + off + unknown;
 
   if (total === 0) {
     return <p className="py-16 text-center text-sm text-mute">Không có dữ liệu</p>;
@@ -44,7 +52,7 @@ export function OnOffDonut({ on, off }: { on: number; off: number }) {
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
             <Pie
-              data={data}
+              data={data.filter((d) => d.value > 0)}
               dataKey="value"
               nameKey="name"
               innerRadius={68}
@@ -53,9 +61,90 @@ export function OnOffDonut({ on, off }: { on: number; off: number }) {
               cornerRadius={6}
               strokeWidth={0}
             >
-              {data.map((d) => (
-                <Cell key={d.name} fill={d.color} />
-              ))}
+              {data
+                .filter((d) => d.value > 0)
+                .map((d) => (
+                  <Cell key={d.name} fill={d.color} />
+                ))}
+            </Pie>
+            <Tooltip
+              contentStyle={{ borderRadius: 8, border: `1px solid ${HAIRLINE}`, fontSize: 12 }}
+              formatter={(value, name) => [numberFmt.format(Number(value)), String(name)]}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+          <span className="text-xs font-medium uppercase tracking-normal text-mute">Tổng</span>
+          <span className="text-3xl font-semibold text-ink">{numberFmt.format(total)}</span>
+          <span className="text-xs text-body">server</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-sm">
+        {data.map((d) => (
+          <div key={d.name} className="rounded-sm border border-hairline bg-canvas-soft p-3">
+            <div className="mb-2 flex items-center gap-2 text-body">
+              <span className={`h-2.5 w-2.5 rounded-full ${d.dot}`} />
+              {d.name}
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-xl font-semibold text-ink">{numberFmt.format(d.value)}</span>
+              <span className="font-mono text-xs text-mute">
+                {((d.value / total) * 100).toFixed(1)}%
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Four groups that must sum to total_servers (design §9.4). "Chưa có dữ liệu" is
+// grey, not red: unmeasured is unknown, not bad.
+export function UptimeDistributionDonut({
+  full,
+  partial,
+  zero,
+  noData,
+}: {
+  full: number;
+  partial: number;
+  zero: number;
+  noData: number;
+}) {
+  const data = [
+    { name: "100%", value: full, color: LINK, dot: "bg-link" },
+    { name: "Một phần", value: partial, color: WARN, dot: "bg-warning" },
+    { name: "0%", value: zero, color: ERR, dot: "bg-error" },
+    { name: "Chưa có dữ liệu", value: noData, color: MUTE, dot: "bg-hairline-strong" },
+  ];
+  const total = full + partial + zero + noData;
+
+  if (total === 0) {
+    return <p className="py-16 text-center text-sm text-mute">Không có dữ liệu</p>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="relative h-[260px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Pie
+              data={data.filter((d) => d.value > 0)}
+              dataKey="value"
+              nameKey="name"
+              innerRadius={68}
+              outerRadius={104}
+              paddingAngle={3}
+              cornerRadius={6}
+              strokeWidth={0}
+            >
+              {data
+                .filter((d) => d.value > 0)
+                .map((d) => (
+                  <Cell key={d.name} fill={d.color} />
+                ))}
             </Pie>
             <Tooltip
               contentStyle={{ borderRadius: 8, border: `1px solid ${HAIRLINE}`, fontSize: 12 }}
@@ -71,26 +160,20 @@ export function OnOffDonut({ on, off }: { on: number; off: number }) {
       </div>
 
       <div className="grid grid-cols-2 gap-3 text-sm">
-        <div className="rounded-sm border border-hairline bg-canvas-soft p-3">
-          <div className="mb-2 flex items-center gap-2 text-body">
-            <span className="h-2.5 w-2.5 rounded-full bg-link" />
-            On
+        {data.map((d) => (
+          <div key={d.name} className="rounded-sm border border-hairline bg-canvas-soft p-3">
+            <div className="mb-2 flex items-center gap-2 text-body">
+              <span className={`h-2.5 w-2.5 rounded-full ${d.dot}`} />
+              {d.name}
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-xl font-semibold text-ink">{numberFmt.format(d.value)}</span>
+              <span className="font-mono text-xs text-mute">
+                {((d.value / total) * 100).toFixed(1)}%
+              </span>
+            </div>
           </div>
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="text-xl font-semibold text-ink">{numberFmt.format(on)}</span>
-            <span className="font-mono text-xs text-mute">{onPct.toFixed(1)}%</span>
-          </div>
-        </div>
-        <div className="rounded-sm border border-hairline bg-canvas-soft p-3">
-          <div className="mb-2 flex items-center gap-2 text-body">
-            <span className="h-2.5 w-2.5 rounded-full bg-hairline-strong" />
-            Off
-          </div>
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="text-xl font-semibold text-ink">{numberFmt.format(off)}</span>
-            <span className="font-mono text-xs text-mute">{offPct.toFixed(1)}%</span>
-          </div>
-        </div>
+        ))}
       </div>
     </div>
   );

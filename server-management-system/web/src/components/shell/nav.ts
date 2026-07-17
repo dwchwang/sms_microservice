@@ -10,8 +10,8 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Tổng quan", icon: LayoutDashboard },
-  { href: "/servers", label: "Servers", icon: Server, scope: "server:read" },
+  { href: "/servers", label: "Servers", icon: Server, scope: "server:list" },
   { href: "/reports", label: "Báo cáo", icon: BarChart3, scope: "report:view" },
-  { href: "/users", label: "Người dùng", icon: Users, scope: "user:manage" },
+  { href: "/users", label: "Người dùng", icon: Users, scope: "user:list" },
   { href: "/profile", label: "Hồ sơ", icon: User },
 ];

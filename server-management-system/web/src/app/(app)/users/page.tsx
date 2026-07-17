@@ -33,7 +33,7 @@ function RoleSelect({ user, disabled }: { user: UserProfile; disabled: boolean }
   async function onChange(role: string) {
     try {
       await update.mutateAsync({ userId: user.id, role });
-      toast.success(`Đã đổi role ${user.username} → ${role}`);
+      toast.success(`Đã đổi role ${user.email} → ${role}`);
     } catch (err) {
       toast.error(errorMessage(err, "Đổi role thất bại"));
     }
@@ -60,7 +60,7 @@ export default function UsersPage() {
   const [page, setPage] = useState(1);
 
   useEffect(() => {
-    if (me && !can("user:manage")) router.replace("/403");
+    if (me && !can("user:list")) router.replace("/403");
   }, [me, can, router]);
 
   const { data, isLoading, isError } = useUsers(page);
@@ -98,7 +98,7 @@ export default function UsersPage() {
                 return (
                   <TableRow key={u.id}>
                     <TableCell className="font-medium text-ink">
-                      {u.username}
+                      {u.email}
                       {isSelf ? <span className="ml-2 text-xs text-mute">(bạn)</span> : null}
                     </TableCell>
                     <TableCell>{u.full_name}</TableCell>

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
@@ -94,5 +95,45 @@ func (w *esFactWriter) Write(ctx context.Context, facts []monitor.Fact) error {
 	if res.IsError() {
 		return fmt.Errorf("bulk returned %s", res.Status())
 	}
-	return nil
+	return bulkItemError(res.Body)
+}
+
+type bulkResponse struct {
+	Errors bool `json:"errors"`
+	Items  []map[string]struct {
+		Status int `json:"status"`
+		Error  *struct {
+			Type   string `json:"type"`
+			Reason string `json:"reason"`
+		} `json:"error"`
+	} `json:"items"`
+}
+
+// A _bulk answers 200 even when every item was rejected; the outcome is in the body.
+func bulkItemError(body io.Reader) error {
+	var parsed bulkResponse
+	if err := json.NewDecoder(body).Decode(&parsed); err != nil {
+		return fmt.Errorf("failed to decode bulk response: %w", err)
+	}
+	if !parsed.Errors {
+		return nil
+	}
+
+	failed := 0
+	var sample string
+	for _, item := range parsed.Items {
+		for _, outcome := range item {
+			if outcome.Error == nil {
+				continue
+			}
+			failed++
+			if sample == "" {
+				sample = fmt.Sprintf("%s: %s", outcome.Error.Type, outcome.Error.Reason)
+			}
+		}
+	}
+	if failed == 0 {
+		return nil
+	}
+	return fmt.Errorf("bulk rejected %d of %d items (%s)", failed, len(parsed.Items), sample)
 }

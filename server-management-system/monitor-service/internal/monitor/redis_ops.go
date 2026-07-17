@@ -132,7 +132,7 @@ func (r *redisOps) GetTarget(ctx context.Context, serverID string) (*Target, err
 
 func (r *redisOps) ApplyStatus(ctx context.Context, t Target, status, checkedAt string, latencyMs int, roundID int64) (int, error) {
 	return statusScript.Run(ctx, r.client,
-		[]string{statusKey(t.ServerID), statusStream},
+		[]string{statusKey(t.ServerID), statusStream, uptimeIndexKey},
 		t.ServerID, status, checkedAt, latencyMs, roundID,
 	).Int()
 }

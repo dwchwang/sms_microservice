@@ -27,6 +27,7 @@ type ServerService interface {
 	UpdateServer(ctx context.Context, serverID string, req *dto.UpdateServerRequest) (*dto.ServerResponse, error)
 	DeleteServer(ctx context.Context, serverID string) error
 	GetStats(ctx context.Context) (*dto.StatsResponse, error)
+	GetUptime(ctx context.Context) (*dto.UptimeResponse, error)
 }
 
 const (
@@ -35,6 +36,10 @@ const (
 
 	statsCacheKey = "server:stats:cache"
 	statsCacheTTL = 10 * time.Second
+
+	uptimeCacheKey  = "server:uptime:cache"
+	uptimeCacheTTL  = 10 * time.Second
+	topLowestUptime = 10
 )
 
 // serverServiceImpl implements ServerService.
@@ -44,6 +49,7 @@ type serverServiceImpl struct {
 	cidr      *validator.CIDRValidator
 	targets   projection.TargetProjection
 	lastCheck status.LastCheckReader
+	uptime    status.UptimeReader
 	log       zerolog.Logger
 }
 
@@ -76,6 +82,7 @@ func NewServerService(
 	cidr *validator.CIDRValidator,
 	targets projection.TargetProjection,
 	lastCheck status.LastCheckReader,
+	uptime status.UptimeReader,
 	log zerolog.Logger,
 ) ServerService {
 	var cache serverCache
@@ -88,6 +95,7 @@ func NewServerService(
 		cidr:      cidr,
 		targets:   targets,
 		lastCheck: lastCheck,
+		uptime:    uptime,
 		log:       log,
 	}
 }
@@ -383,6 +391,70 @@ func (s *serverServiceImpl) GetStats(ctx context.Context) (*dto.StatsResponse, e
 		_ = s.cache.Set(ctx, statsCacheKey, data, statsCacheTTL)
 	}
 	return resp, nil
+}
+
+// GetUptime builds the dashboard's uptime picture from the lifetime counters
+// Monitoring keeps in Redis. It reads no snapshot and no Elasticsearch, so it
+// answers at any moment, including for a fleet that started five minutes ago.
+func (s *serverServiceImpl) GetUptime(ctx context.Context) (*dto.UptimeResponse, error) {
+	if s.cache != nil {
+		if cached, err := s.cache.Get(ctx, uptimeCacheKey); err == nil {
+			var resp dto.UptimeResponse
+			if err := json.Unmarshal([]byte(cached), &resp); err == nil {
+				return &resp, nil
+			}
+		}
+	}
+
+	stats, err := s.GetStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &dto.UptimeResponse{
+		TotalServers:      stats.Total,
+		ServersOn:         stats.On,
+		ServersOff:        stats.Off,
+		ServersUnknown:    stats.Unknown,
+		Top10LowestUptime: []status.ServerUptime{},
+	}
+
+	if s.uptime == nil {
+		return resp, nil
+	}
+
+	up, err := s.uptime.Stats(ctx, topLowestUptime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read uptime counters: %w", err)
+	}
+
+	resp.ServersUptime100 = up.Full
+	resp.ServersUptimePartial = up.Partial
+	resp.ServersUptime0 = up.Zero
+	resp.AvgUptimePct = up.AvgPct
+	// Servers the index has never scored: counted, never guessed at.
+	resp.ServersNoData = max(stats.Total-up.Measured, 0)
+	if len(up.Worst) > 0 {
+		resp.Top10LowestUptime = up.Worst
+		s.fillWorstNames(ctx, resp.Top10LowestUptime)
+	}
+
+	if s.cache != nil {
+		data, _ := json.Marshal(resp)
+		_ = s.cache.Set(ctx, uptimeCacheKey, data, uptimeCacheTTL)
+	}
+	return resp, nil
+}
+
+// fillWorstNames reads names from PostgreSQL, the owner of server_name.
+func (s *serverServiceImpl) fillWorstNames(ctx context.Context, worst []status.ServerUptime) {
+	for i := range worst {
+		srv, err := s.repo.FindByServerID(ctx, worst[i].ServerID)
+		if err != nil || srv == nil {
+			continue
+		}
+		worst[i].ServerName = srv.ServerName
+	}
 }
 
 // enrichLastCheck fills last_status_check from Redis. It runs outside the cache

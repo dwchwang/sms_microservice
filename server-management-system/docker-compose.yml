@@ -29,7 +29,14 @@ services:
   redis:
     image: redis:8-alpine
     container_name: vcs-sms-redis
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_secret} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # volatile-lru, not allkeys-lru: only the cache carries a TTL. The lifetime
+    # uptime counters, monitor status, target projection and the status stream
+    # have none, and evicting any of them loses data that cannot be recomputed.
+    # AOF keeps the counters across a restart.
+    command: >
+      redis-server --requirepass ${REDIS_PASSWORD:-redis_secret}
+      --maxmemory 512mb --maxmemory-policy volatile-lru
+      --appendonly yes --appendfsync everysec
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -117,8 +124,9 @@ services:
       context: .
       dockerfile: auth-service/Dockerfile
     container_name: vcs-sms-auth
-    ports:
-      - "${AUTH_PORT:-8081}:8081"
+    # Traefik only: the ForwardAuth headers are trusted, so direct access would bypass auth.
+    expose:
+      - "8081"
     env_file:
       - .env
     depends_on:
@@ -136,8 +144,8 @@ services:
       context: .
       dockerfile: server-service/Dockerfile
     container_name: vcs-sms-server
-    ports:
-      - "${SERVER_PORT:-8082}:8082"
+    expose:
+      - "8082"
     env_file:
       - .env
     depends_on:
@@ -155,8 +163,8 @@ services:
       context: .
       dockerfile: monitor-service/Dockerfile
     container_name: vcs-sms-monitor
-    ports:
-      - "${MONITOR_PORT:-8083}:8083"
+    expose:
+      - "8083"
     env_file:
       - .env
     environment:
@@ -180,8 +188,8 @@ services:
       context: .
       dockerfile: report-service/Dockerfile
     container_name: vcs-sms-report
-    ports:
-      - "${REPORT_PORT:-8084}:8084"
+    expose:
+      - "8084"
     env_file:
       - .env
     # The snapshot job reads the population from Server Service.

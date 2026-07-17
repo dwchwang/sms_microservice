@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { useServers } from "@/lib/api/hooks";
 import type { ServerListParams } from "@/lib/api/endpoints";
-import type { ServerResponse } from "@/lib/api/types";
+import type { ServerResponse, ServerStatus } from "@/lib/api/types";
 import { Can } from "@/components/common/can";
 import { PageHeader } from "@/components/common/page-header";
 import { StatusPill } from "@/components/common/status-pill";
@@ -91,7 +91,7 @@ function ServersView() {
   const [editing, setEditing] = useState<ServerResponse | null>(null);
   const [deleting, setDeleting] = useState<ServerResponse | null>(null);
 
-  const status = (sp.get("status") as "on" | "off" | null) ?? undefined;
+  const status = (sp.get("status") as ServerStatus | null) ?? undefined;
   const sortBy = sp.get("sort_by") ?? "created_at";
   const sortOrder = (sp.get("sort_order") as "asc" | "desc") ?? "desc";
   const page = numberParam(sp.get("page"), 1);
@@ -237,8 +237,9 @@ function ServersView() {
         >
           <TabsList>
             <TabsTrigger value="all">Tất cả</TabsTrigger>
-            <TabsTrigger value="on">On</TabsTrigger>
-            <TabsTrigger value="off">Off</TabsTrigger>
+            <TabsTrigger value="ON">On</TabsTrigger>
+            <TabsTrigger value="OFF">Off</TabsTrigger>
+            <TabsTrigger value="UNKNOWN">Chưa rõ</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -302,13 +303,15 @@ function ServersView() {
               ))
             ) : servers.length ? (
               servers.map((s) => (
-                <TableRow key={s.id}>
+                <TableRow key={s.server_id}>
                   <TableCell className="font-mono text-ink">{s.server_id}</TableCell>
                   <TableCell className="text-ink">{s.server_name}</TableCell>
                   <TableCell>
                     <StatusPill status={s.status} />
                   </TableCell>
-                  <TableCell className="font-mono">{s.ipv4}</TableCell>
+                  <TableCell className="font-mono">
+                    {s.ipv4}:{s.tcp_port}
+                  </TableCell>
                   <TableCell>{orDash(s.location)}</TableCell>
                   <TableCell className="text-mute">{formatDateTime(s.created_at)}</TableCell>
                   <TableCell className="text-mute">{formatDateTime(s.updated_at)}</TableCell>

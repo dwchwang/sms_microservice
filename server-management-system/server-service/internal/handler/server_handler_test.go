@@ -30,10 +30,16 @@ type mockServerService struct {
 	deleteErr    error
 	statsResult  *dto.StatsResponse
 	statsErr     error
+	uptimeResult *dto.UptimeResponse
+	uptimeErr    error
 }
 
 func (m *mockServerService) GetStats(ctx context.Context) (*dto.StatsResponse, error) {
 	return m.statsResult, m.statsErr
+}
+
+func (m *mockServerService) GetUptime(ctx context.Context) (*dto.UptimeResponse, error) {
+	return m.uptimeResult, m.uptimeErr
 }
 
 func (m *mockServerService) CreateServer(ctx context.Context, req *dto.CreateServerRequest) (*dto.ServerResponse, error) {

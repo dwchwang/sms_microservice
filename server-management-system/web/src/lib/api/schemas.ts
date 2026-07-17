@@ -7,24 +7,32 @@ const ipv4 = z
     "IPv4 phải có dạng x.x.x.x",
   );
 
+const tcpPort = z.coerce
+  .number()
+  .int()
+  .min(1, "Cổng từ 1 đến 65535")
+  .max(65535, "Cổng từ 1 đến 65535");
+
 export const loginSchema = z.object({
-  username: z.string().min(1, "Bắt buộc"),
+  email: z.string().email("Email không hợp lệ"),
   password: z.string().min(1, "Bắt buộc"),
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
 export const registerSchema = z.object({
-  username: z.string().min(3, "Tối thiểu 3 ký tự").max(100),
   email: z.string().email("Email không hợp lệ"),
   password: z.string().min(8, "Mật khẩu tối thiểu 8 ký tự"),
   full_name: z.string().min(1, "Bắt buộc"),
 });
 export type RegisterInput = z.infer<typeof registerSchema>;
 
-const optionalNumber = z
+// "" must become undefined so the field is omitted rather than sent as 0:
+// the columns are CHECK (NULL OR > 0).
+const optionalPositiveInt = z
   .union([z.coerce.number(), z.literal("")])
   .optional()
-  .transform((v) => (v === "" || v === undefined ? undefined : Number(v)));
+  .transform((v) => (v === "" || v === undefined ? undefined : Number(v)))
+  .pipe(z.number().int().positive("Phải lớn hơn 0").optional());
 
 export const createServerSchema = z.object({
   server_id: z
@@ -34,32 +42,35 @@ export const createServerSchema = z.object({
     .regex(/^[A-Z0-9\-_]+$/, "Chỉ chữ HOA, số, - và _"),
   server_name: z.string().min(3, "Tối thiểu 3 ký tự").max(255),
   ipv4,
+  tcp_port: tcpPort,
   os: z.string().optional(),
-  cpu_cores: optionalNumber.pipe(z.number().int().min(1).optional()),
-  ram_gb: optionalNumber.pipe(z.number().min(0).optional()),
-  disk_gb: optionalNumber.pipe(z.number().min(0).optional()),
+  cpu_cores: optionalPositiveInt,
+  ram_gb: optionalPositiveInt,
+  disk_gb: optionalPositiveInt,
   location: z.string().optional(),
   description: z.string().optional(),
 });
 export type CreateServerInput = z.infer<typeof createServerSchema>;
 
+// server_id and status are absent on purpose: server_id cannot change, and status
+// comes only from monitoring.
 export const updateServerSchema = z.object({
   server_name: z.string().min(3).max(255).optional(),
   ipv4: ipv4.optional(),
+  tcp_port: tcpPort.optional(),
   os: z.string().optional(),
-  cpu_cores: optionalNumber.pipe(z.number().int().min(1).optional()),
-  ram_gb: optionalNumber.pipe(z.number().min(0).optional()),
-  disk_gb: optionalNumber.pipe(z.number().min(0).optional()),
+  cpu_cores: optionalPositiveInt,
+  ram_gb: optionalPositiveInt,
+  disk_gb: optionalPositiveInt,
   location: z.string().optional(),
   description: z.string().optional(),
-  status: z.enum(["on", "off"]).optional(),
 });
 export type UpdateServerInput = z.infer<typeof updateServerSchema>;
 
 export const sendReportSchema = z.object({
   start_date: z.string().min(1, "Bắt buộc"),
   end_date: z.string().min(1, "Bắt buộc"),
-  email: z.string().email("Email không hợp lệ"),
+  recipient_email: z.string().email("Email không hợp lệ"),
 });
 export type SendReportInput = z.infer<typeof sendReportSchema>;
 

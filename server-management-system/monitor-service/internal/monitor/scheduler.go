@@ -15,29 +15,51 @@ const (
 // Scheduler loads one ping queue per round. It runs on every instance; only
 // the instance that wins the round lock does the loading.
 type Scheduler struct {
-	ops RedisOps
-	log zerolog.Logger
+	ops     RedisOps
+	metrics *Metrics
+	log     zerolog.Logger
+
+	// prevRound is the round measured for checks_missing on the next tick.
+	prevRound int64
 }
 
-// NewScheduler creates a Scheduler.
-func NewScheduler(ops RedisOps, log zerolog.Logger) *Scheduler {
-	return &Scheduler{ops: ops, log: log}
+// NewScheduler creates a Scheduler. metrics may be nil.
+func NewScheduler(ops RedisOps, metrics *Metrics, log zerolog.Logger) *Scheduler {
+	return &Scheduler{ops: ops, metrics: metrics, log: log}
 }
 
-// Run ticks once per round until ctx is cancelled.
+// Run loads one round per round boundary until ctx is cancelled.
 func (s *Scheduler) Run(ctx context.Context) {
-	ticker := time.NewTicker(RoundSeconds * time.Second)
-	defer ticker.Stop()
-
-	s.tick(ctx)
 	for {
-		select {
-		case <-ctx.Done():
+		s.tick(ctx)
+		if !s.sleepToNextRound(ctx) {
 			s.log.Info().Msg("Scheduler stopped")
 			return
-		case <-ticker.C:
-			s.tick(ctx)
 		}
+	}
+}
+
+// nextRoundDelay is the time left in the current round, re-read from Redis every
+// round. A fixed ticker would instead run on whatever phase the process booted
+// at, so a round's queue would load partway through the round, and a single late
+// tick would drop a round with no queue for checks_missing to see.
+func (s *Scheduler) nextRoundDelay(ctx context.Context) time.Duration {
+	now, err := s.ops.Time(ctx)
+	if err != nil {
+		s.log.Error().Err(err).Msg("Failed to read Redis time; falling back to a fixed delay")
+		return RoundSeconds * time.Second
+	}
+	return time.Duration(RoundSeconds-now.Unix()%RoundSeconds) * time.Second
+}
+
+func (s *Scheduler) sleepToNextRound(ctx context.Context) bool {
+	timer := time.NewTimer(s.nextRoundDelay(ctx))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -51,6 +73,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 		return
 	}
 	roundID := RoundID(now)
+	s.measurePrevRound(ctx, roundID)
 
 	won, err := s.ops.AcquireRoundLock(ctx, roundID)
 	if err != nil {
@@ -90,7 +113,31 @@ func (s *Scheduler) tick(ctx context.Context) {
 		return
 	}
 
+	if s.metrics != nil {
+		s.metrics.TargetsExpected.Set(float64(loaded))
+	}
 	s.log.Info().Int64("round_id", roundID).Int("targets_expected", loaded).Msg("Round loaded")
+}
+
+// measurePrevRound reports what the finished round never got to ping.
+func (s *Scheduler) measurePrevRound(ctx context.Context, roundID int64) {
+	if s.metrics == nil || s.prevRound == 0 || s.prevRound == roundID {
+		s.prevRound = roundID
+		return
+	}
+
+	missing, err := s.ops.QueueDepth(ctx, s.prevRound)
+	if err != nil {
+		s.log.Error().Err(err).Int64("round_id", s.prevRound).Msg("Failed to measure checks_missing")
+		s.prevRound = roundID
+		return
+	}
+	s.metrics.ChecksMissing.Set(float64(missing))
+	if missing > 0 {
+		s.log.Warn().Int64("round_id", s.prevRound).Int64("checks_missing", missing).
+			Msg("Round ended with unpinged targets; consider more workers or instances")
+	}
+	s.prevRound = roundID
 }
 
 // loadQueue scans the target set and pushes it onto the round's queue.

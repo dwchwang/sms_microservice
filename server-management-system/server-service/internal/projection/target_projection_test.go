@@ -107,6 +107,10 @@ func (f *fakeTargetOps) SRem(ctx context.Context, key string, members ...any) er
 	return f.record("SREM", key, members...)
 }
 
+func (f *fakeTargetOps) ZRem(ctx context.Context, key string, members ...any) error {
+	return f.record("ZREM", key, members...)
+}
+
 func (f *fakeTargetOps) Del(ctx context.Context, keys ...string) error {
 	if err := f.record("DEL", keys[0], anySlice(keys[1:])...); err != nil {
 		return err
@@ -196,14 +200,22 @@ func TestDelete_RemovesIDBeforeHash(t *testing.T) {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
-	if got := strings.Join(fake.ops(), ","); got != "SREM,DEL" {
-		t.Fatalf("expected SREM before DEL, got %s", got)
+	// SREM first so Monitoring cannot pick the target up again, then the hash,
+	// then the uptime index and status so a deleted server stops scoring.
+	if got := strings.Join(fake.ops(), ","); got != "SREM,DEL,ZREM,DEL" {
+		t.Fatalf("expected SREM,DEL,ZREM,DEL, got %s", got)
 	}
 	if fake.calls[0].key != "server:monitor-target:ids" {
 		t.Errorf("unexpected set key %q", fake.calls[0].key)
 	}
 	if fake.calls[1].key != "server:monitor-target:SRV-001" {
 		t.Errorf("unexpected hash key %q", fake.calls[1].key)
+	}
+	if fake.calls[2].key != "monitor:uptime:index" {
+		t.Errorf("unexpected uptime index key %q", fake.calls[2].key)
+	}
+	if fake.calls[3].key != "monitor:status:SRV-001" {
+		t.Errorf("unexpected status key %q", fake.calls[3].key)
 	}
 }
 

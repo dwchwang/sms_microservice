@@ -1,6 +1,10 @@
 package dto
 
-import "time"
+import (
+	"time"
+
+	"github.com/vcs-sms/server-service/internal/status"
+)
 
 // ServerResponse is the public representation of a server.
 type ServerResponse struct {
@@ -28,6 +32,27 @@ type StatsResponse struct {
 	On      int64 `json:"on"`
 	Off     int64 `json:"off"`
 	Unknown int64 `json:"unknown"`
+}
+
+// UptimeResponse is the dashboard's live uptime picture, built from the lifetime
+// counters Monitoring keeps in Redis. Unlike the report, it needs no snapshot and
+// is answerable at any moment.
+type UptimeResponse struct {
+	TotalServers   int64 `json:"total_servers"`
+	ServersOn      int64 `json:"servers_on"`
+	ServersOff     int64 `json:"servers_off"`
+	ServersUnknown int64 `json:"servers_unknown"`
+
+	// ServersNoData are active servers Monitoring has never checked.
+	ServersNoData        int64 `json:"servers_no_data"`
+	ServersUptime100     int64 `json:"servers_uptime_100"`
+	ServersUptimePartial int64 `json:"servers_uptime_partial"`
+	ServersUptime0       int64 `json:"servers_uptime_0"`
+
+	// AvgUptimePct is null when no server has been checked yet.
+	AvgUptimePct *float64 `json:"avg_uptime_pct"`
+
+	Top10LowestUptime []status.ServerUptime `json:"top_10_lowest_uptime"`
 }
 
 // PopulationServer is one server in the reporting population.

@@ -1,46 +1,156 @@
-# Chiến lược Cơ sở dữ liệu: Shared Instance, Separate Schemas
+# 02 — Chiến lược dữ liệu
 
-Trong hệ thống VCS-SMS, chúng ta sử dụng PostgreSQL 17 làm cơ sở dữ liệu quan hệ chính. Quyết định quan trọng nhất ở đây là sử dụng **Shared Instance, Separate Logical Schemas** (Chung 1 server vật lý, nhưng tách schema logic).
+> Ba database tách rời + Redis + Elasticsearch. Mỗi kho có **một** owner.
 
-## 1. Khái niệm Schema trong PostgreSQL
+---
 
-Trong MySQL, một "Database" thường đồng nghĩa với một tập hợp các bảng.
-Nhưng trong PostgreSQL, cấu trúc có 3 tầng: **Database Server (Instance)** > **Database** > **Schema** > **Table**.
+## 1. Database-per-service
 
-Thay vì tạo 5 Database hoàn toàn riêng biệt (ví dụ `vcs_auth_db`, `vcs_server_db`), chúng ta tạo **1 Database duy nhất** tên là `vcs_sms`. Bên trong Database đó, chúng ta tạo ra 5 **Schemas**:
-- `auth_schema`
-- `server_schema`
-- `monitor_schema`
-- `report_schema`
-- `fileio_schema`
+| Database | Owner | DB user | Bảng |
+|---|---|---|---|
+| `identity_db` | auth-service | `identity_user` | `users`, `roles`, `permissions`, `role_permissions` |
+| `server_db` | server-service | `server_user_v2` | `servers`, `api_idempotency` |
+| `report_db` | report-service | `report_user_v2` | `report_jobs`, `daily_snapshots` |
 
-## 2. Tại sao lại dùng cách này?
+Không service nào có credential của database service khác. Đây là ranh giới được
+**cưỡng chế bằng quyền DB**, không phải bằng quy ước.
 
-### 2.1. Đạt được ranh giới (Boundaries) của Microservice
-Quy tắc vàng của Microservice là: **Mỗi service phải sở hữu dữ liệu của riêng nó**. Service A không được chọc trực tiếp vào Database của Service B.
+### Vì sao không dùng schema chung
 
-Bằng cách tạo các schema riêng và **DB Users riêng**, ta thiết lập được ranh giới này ở cấp độ quyền hạn (Permissions):
-- User `auth_user` chỉ có quyền trên `auth_schema`.
-- User `report_user` chỉ có quyền trên `report_schema`.
-Nếu lập trình viên vô tình viết một câu query từ `report-service` cố gắng `DELETE FROM auth_schema.users`, Postgres sẽ chặn lại ngay lập tức (Permission Denied).
+Schema chung cho phép service A `JOIN` thẳng vào bảng của service B. Một khi
+chuyện đó xảy ra, đổi schema của B là làm gãy A, và ranh giới service chỉ còn trên
+giấy. Tách database làm cho việc đó **không thể**, chứ không phải "không nên".
 
-### 2.2. Nhẹ tài nguyên (Resource Efficiency)
-Mỗi một Database trong PostgreSQL đều duy trì một tập hợp các background worker processes và shared memory riêng. Chạy 5 Postgres databases riêng biệt sẽ tiêu tốn RAM và CPU overhead đáng kể, trong khi số lượng bảng của chúng ta không quá nhiều.
-Dùng Shared Instance giúp tối ưu tài nguyên cho một hệ thống quy mô vừa, rất phù hợp khi chạy bằng Docker trên máy local hoặc server nhỏ.
+Cái giá: muốn dữ liệu của service khác thì phải gọi API. Ví dụ report-service lấy
+population qua `GET /internal/servers` của server-service chứ không `SELECT` thẳng.
 
-### 2.3. Giải quyết bài toán Cross-Schema Read (Đọc chéo)
-Đôi khi, nguyên tắc "Không chọc DB của nhau" gây ra khó khăn lớn về hiệu năng.
-Ví dụ: `monitor-service` cần danh sách IP của 10.000 servers để ping. Danh sách này nằm ở bảng `servers` của `server-service`.
-- **Cách Microservice chuẩn mực**: `monitor-service` gọi HTTP API sang `server-service` yêu cầu danh sách. Nhược điểm: Truyền 10.000 bản ghi qua mạng HTTP rất chậm, tốn băng thông, và phụ thuộc (nếu `server-service` chết, `monitor-service` cũng chết theo).
-- **Cách Shared Schema giải quyết**: Vì cùng nằm trên 1 Database vật lý, ta có thể `GRANT SELECT` (Cấp quyền Đọc) trên bảng `server_schema.servers` cho `monitor_user`. Khi đó `monitor-service` có thể query thẳng vào bảng servers với tốc độ của mạng nội bộ DB.
-**Lưu ý:** Chỉ cấp quyền ĐỌC (SELECT), quyền GHI (INSERT/UPDATE/DELETE) vẫn thuộc độc quyền của `server-service`. Điều này giữ được sự nhất quán dữ liệu (Data Integrity).
+---
 
-## 3. Quản lý Connection Pool
+## 2. Bảng `servers` — những cột đáng chú ý
 
-Khi ứng dụng Go kết nối với DB bằng GORM, nó sẽ duy trì một "Pool" các kết nối mở sẵn. Vì chúng ta chia thành 5 services, sẽ có 5 Connection Pools độc lập đập vào cùng 1 Postgres server. Cần cấu hình `MaxOpenConns` trong Go sao cho tổng số connection của 5 service không vượt quá giới hạn cấu hình của Postgres (thường là 100).
+```sql
+server_id            VARCHAR(100) NOT NULL   -- ID nghiệp vụ, unique TOÀN CỤC
+status               VARCHAR(20)  NOT NULL DEFAULT 'UNKNOWN'
+                     CHECK (status IN ('ON','OFF','UNKNOWN'))
+status_version       BIGINT       NOT NULL DEFAULT 0   -- version guard
+last_status_event_id VARCHAR(255)                      -- stream ID đã apply
+ipv4                 INET         NOT NULL
+cpu_cores            INT          CHECK (cpu_cores IS NULL OR cpu_cores > 0)
+deleted_at           TIMESTAMPTZ                       -- soft delete
+```
 
-## 4. Bổ trợ bằng Redis và Elasticsearch
+### Index
 
-Postgres không phải công cụ vạn năng:
-- **Redis (Ver 8)** được dùng cho dữ liệu siêu nhanh, siêu ngắn hạn: Rate Limiting, Distributed Lock (Khóa phân tán), JWT Blacklist, Caching API.
-- **Elasticsearch (Ver 8)** được dùng cho dữ liệu Log cực lớn (Time-series data). Mỗi phút 10.000 server sinh ra 10.000 bản ghi status. Khi chạy liên tục 24/24, 1 ngày có thể lên tới 14.4 triệu bản ghi. Ở chế độ demo (chỉ chạy khi bật hệ thống), số lượng bản ghi sẽ tỷ lệ thuận với thời gian chạy thực tế. Đổ dữ liệu này vào Postgres sẽ làm nó phình to và chậm chạp. Elasticsearch sinh ra để giải quyết bài toán index và aggregate (tính toán thống kê) dữ liệu log khổng lồ này với tốc độ mili-giây.
+```sql
+-- server_id unique kể cả row đã xóa: bảo vệ lịch sử, không cho tái sử dụng ID
+CREATE UNIQUE INDEX ux_servers_server_id ON servers (server_id);
+
+-- server_name chỉ unique trên row còn sống: cho phép trùng tên với server đã xóa
+CREATE UNIQUE INDEX ux_servers_active_name ON servers (server_name)
+    WHERE deleted_at IS NULL;
+```
+
+### `status_version` — vì sao cần
+
+Event từ stream có thể tới **trùng** hoặc **sai thứ tự** (khi replay sau sự cố).
+Mọi UPDATE đều đi kèm điều kiện:
+
+```sql
+UPDATE servers SET status=?, status_version=?
+WHERE server_id=? AND status_version < ?
+```
+
+`status_version` chính là `round_id`, vốn tăng đơn điệu theo thời gian. Event cũ
+không bao giờ ghi đè được dữ liệu mới → apply trở nên **idempotent**, và nhờ đó
+việc replay cả stream là an toàn.
+
+### Cột số dùng `*int` chứ không `int`
+
+`cpu_cores`, `ram_gb`, `disk_gb` có ràng buộc `NULL hoặc > 0`. Với `int` thuần,
+cột `NULL` bị scan thành `0` rồi ghi ngược `0` xuống → vi phạm CHECK. Kiểu con trỏ
+phân biệt được "chưa set" và "bằng 0".
+
+---
+
+## 3. Bảng `daily_snapshots` — mắt xích retention
+
+```sql
+PRIMARY KEY (server_id, date)
+on_checks        INT              -- số lần check trả về ON
+actual_checks    INT              -- số lần thực sự đo được
+expected_checks  INT              -- số lần LẼ RA phải đo, theo lifecycle server
+uptime_pct       NUMERIC(5,2)     -- NULL khi actual_checks = 0
+last_status      VARCHAR(10)      -- ON/OFF cuối ngày; NULL khi no_data
+```
+
+**`uptime_pct` NULL chứ không phải 0.** Server không ai đo được có uptime **không
+xác định**, không phải 0%. Để 0 sẽ biến một sự cố thu thập dữ liệu thành một báo cáo
+sai. NULL giữ nó ngoài `AVG()` và đưa nó vào nhóm `servers_no_data`.
+
+**`expected_checks` theo lifecycle từng server.** Server tạo lúc 18:00 chỉ kỳ vọng
+360 lần check chứ không phải 1.440 — nếu không, tạo server mới sẽ trông như sự cố
+monitoring.
+
+Bảng này là lý do ES chỉ cần giữ 7 ngày: dữ liệu thô được cô đọng vào đây trước khi
+index bị ILM xóa. Xem [09-flow-reporting-email.md](./09-flow-reporting-email.md).
+
+---
+
+## 4. Redis — mỗi namespace một owner
+
+| Key | Owner | Người đọc | Mục đích |
+|---|---|---|---|
+| `server:monitor-target:ids` (Set) | server-service | monitor | Danh sách server cần ping |
+| `server:monitor-target:{id}` (Hash) | server-service | monitor | `ipv4`, `tcp_port`, `server_name` |
+| `server:monitor-target:ready` | server-service | monitor | Marker projection đã dựng xong |
+| `server:list:version` | server-service | server-service | Bump để vô hiệu cache |
+| `server:list:cache:{hash}:{version}` | server-service | server-service | Cache-aside |
+| `monitor:round:current` | monitor | monitor | Round đang chạy |
+| `monitor:ping:queue:{round_id}` (List) | monitor | monitor | Việc của round |
+| `monitor:status:{id}` (Hash) | monitor | server-service | Status, `last_checked_at`, `total_checks`, `on_checks` |
+| `monitor:uptime:index` (ZSet) | monitor | server-service | Uptime luỹ kế mỗi server, phục vụ dashboard |
+| `stream:monitor.status` (Stream) | monitor | server-service | Event `status.changed` |
+
+Không dùng `KEYS server:monitor-target:*` — lệnh đó block Redis và quét toàn
+keyspace. Thay vào đó dùng Set `:ids` làm index và duyệt bằng `SSCAN`.
+
+> ⚠️ Redis chạy `volatile-lru` + `appendonly yes`. **Không** dùng `allkeys-lru`: chỉ
+> `server:list:cache:*` và các key round mới có TTL. Bộ đếm uptime, status, target
+> projection và stream đều không TTL — evict bất kỳ cái nào là mất dữ liệu không tái
+> tạo được từ PostgreSQL.
+
+---
+
+## 5. Elasticsearch — chỉ một người đọc
+
+Index `server-status-logs-YYYY.MM.DD`, một document cho mỗi (server, round).
+
+```text
+_id = "{server_id}:{round_id}"     ← tất định
+```
+
+`_id` tất định làm cho **retry bulk không tạo document trùng**. Đây là điều kiện để
+`actual_checks` không bị đếm thừa.
+
+Mapping do index template cài đặt lúc monitor khởi động. Các field
+`server_id` / `server_name` / `status` phải là **`keyword`**: nếu để ES tự map động,
+chúng thành `text` và toàn bộ aggregation uptime sẽ **âm thầm trả 0**.
+
+ILM: hot 0–7 ngày → xóa index sau 7 ngày (~100 triệu doc, 15–20 GB).
+
+**Job snapshot là consumer duy nhất của ES.** Report đọc `daily_snapshots`, API đọc
+PostgreSQL. Nhờ vậy ES chết chỉ ảnh hưởng snapshot đêm nay, không làm chết API nào.
+
+---
+
+## 6. Cache-aside
+
+```text
+server:list:cache:{query_hash}:{list_version}
+```
+
+Version nằm **trong key**. Bump `server:list:version` không cần xóa key nào — key cũ
+đơn giản là không còn ai hỏi tới, và TTL sẽ dọn chúng.
+
+Bump xảy ra khi: tạo/sửa/xóa/import server, hoặc consumer apply được một status event
+có thật. Không bump khi status không đổi — đó là lý do cache sống sót.

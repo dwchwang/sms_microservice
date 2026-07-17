@@ -77,7 +77,8 @@ func main() {
 	}
 
 	lastCheck := status.NewLastCheckReader(rdb)
-	serverSvc := service.NewServerService(serverRepo, rdb, cidr, targets, lastCheck, log)
+	uptime := status.NewUptimeReader(rdb)
+	serverSvc := service.NewServerService(serverRepo, rdb, cidr, targets, lastCheck, uptime, log)
 	serverHandler := handler.NewServerHandler(serverSvc)
 
 	importSvc := service.NewImportService(
@@ -120,19 +121,20 @@ func main() {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	// Server routes (JWT auth is handled by API Gateway)
-	servers := r.Group("/api/v1/servers")
+	// Traefik ForwardAuth proves the JWT; scopes are enforced here (design §7.10).
+	servers := r.Group("/api/v1/servers", middleware.AuthFromForwardAuth())
 	{
 		// Idempotency guards the two mutations that create rows.
-		servers.POST("", idempotency, serverHandler.CreateServer)
-		servers.POST("/import", idempotency, importHandler.ImportServers)
+		servers.POST("", middleware.RequireScope("server:create"), idempotency, serverHandler.CreateServer)
+		servers.POST("/import", middleware.RequireScope("server:import"), idempotency, importHandler.ImportServers)
 
-		servers.GET("", serverHandler.ListServers)
-		servers.GET("/stats", serverHandler.GetStats)
-		servers.POST("/export", exportHandler.ExportServers)
-		servers.GET("/:server_id", serverHandler.GetServer)
-		servers.PUT("/:server_id", serverHandler.UpdateServer)
-		servers.DELETE("/:server_id", serverHandler.DeleteServer)
+		servers.GET("", middleware.RequireScope("server:list"), serverHandler.ListServers)
+		servers.GET("/stats", middleware.RequireScope("server:stats"), serverHandler.GetStats)
+		servers.GET("/uptime", middleware.RequireScope("server:stats"), serverHandler.GetUptime)
+		servers.POST("/export", middleware.RequireScope("server:export"), exportHandler.ExportServers)
+		servers.GET("/:server_id", middleware.RequireScope("server:view"), serverHandler.GetServer)
+		servers.PUT("/:server_id", middleware.RequireScope("server:update"), serverHandler.UpdateServer)
+		servers.DELETE("/:server_id", middleware.RequireScope("server:delete"), serverHandler.DeleteServer)
 	}
 
 	// Not published through Traefik; reachable only on the internal network.

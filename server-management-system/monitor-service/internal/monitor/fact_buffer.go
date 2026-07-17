@@ -27,6 +27,7 @@ type factWriter interface {
 type FactBuffer struct {
 	writer   factWriter
 	capacity int
+	metrics  *Metrics
 	log      zerolog.Logger
 
 	mu      sync.Mutex
@@ -36,11 +37,12 @@ type FactBuffer struct {
 	failed  uint64
 }
 
-// NewFactBuffer creates a buffer holding at most capacity facts.
-func NewFactBuffer(writer factWriter, capacity int, log zerolog.Logger) *FactBuffer {
+// NewFactBuffer creates a buffer holding at most capacity facts. metrics may be nil.
+func NewFactBuffer(writer factWriter, capacity int, metrics *Metrics, log zerolog.Logger) *FactBuffer {
 	return &FactBuffer{
 		writer:   writer,
 		capacity: capacity,
+		metrics:  metrics,
 		log:      log,
 		pending:  make([]Fact, 0, flushSize),
 	}
@@ -105,6 +107,9 @@ func (b *FactBuffer) Flush(ctx context.Context) {
 			b.failed++
 			b.dropped += uint64(len(batch))
 			b.mu.Unlock()
+			if b.metrics != nil {
+				b.metrics.ESBulkFailure.Inc()
+			}
 			b.log.Error().Err(err).Int("facts", len(batch)).
 				Msg("Dropping health facts after repeated bulk failures")
 			return

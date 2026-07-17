@@ -1,6 +1,6 @@
 "use client";
 
-import { useForm, useWatch, type Resolver } from "react-hook-form";
+import { useForm, type Resolver } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
 import { useCreateServer, useUpdateServer } from "@/lib/api/hooks";
@@ -22,10 +22,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
 import { Field } from "@/components/ui/field";
-import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/common/spinner";
 
-type FormValues = CreateServerInput & { status?: "on" | "off" };
+// No status here: it comes only from monitoring, never from the client.
+type FormValues = CreateServerInput;
 
 export function ServerFormDialog({
   open,
@@ -45,8 +45,6 @@ export function ServerFormDialog({
     handleSubmit,
     setError,
     reset,
-    setValue,
-    control,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(
@@ -57,13 +55,13 @@ export function ServerFormDialog({
           server_id: server!.server_id,
           server_name: server!.server_name,
           ipv4: server!.ipv4,
+          tcp_port: server!.tcp_port,
           os: server!.os ?? "",
           cpu_cores: server!.cpu_cores,
           ram_gb: server!.ram_gb,
           disk_gb: server!.disk_gb,
           location: server!.location ?? "",
           description: server!.description ?? "",
-          status: server!.status,
         }
       : undefined,
   });
@@ -86,8 +84,6 @@ export function ServerFormDialog({
     }
   }
 
-  const status = useWatch({ control, name: "status" });
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -96,7 +92,7 @@ export function ServerFormDialog({
           <DialogDescription>
             {isEdit
               ? "Cập nhật thông tin. server_id không thể thay đổi."
-              : "Nhập đầy đủ thông tin server."}
+              : "IPv4 phải nằm trong dải CIDR được phép."}
           </DialogDescription>
         </DialogHeader>
 
@@ -116,6 +112,19 @@ export function ServerFormDialog({
             <Field label="IPv4" error={errors.ipv4?.message} required>
               <Input {...register("ipv4")} placeholder="10.0.1.100" className="font-mono" />
             </Field>
+            <Field
+              label="Cổng TCP"
+              error={errors.tcp_port?.message}
+              hint="Cổng dùng để health check"
+              required
+            >
+              <Input
+                type="number"
+                {...register("tcp_port")}
+                placeholder="80"
+                className="font-mono"
+              />
+            </Field>
             <Field label="Hệ điều hành" error={errors.os?.message}>
               <Input {...register("os")} placeholder="Ubuntu 22.04" />
             </Field>
@@ -123,10 +132,10 @@ export function ServerFormDialog({
               <Input type="number" {...register("cpu_cores")} placeholder="8" />
             </Field>
             <Field label="RAM (GB)" error={errors.ram_gb?.message}>
-              <Input type="number" step="0.1" {...register("ram_gb")} placeholder="16" />
+              <Input type="number" {...register("ram_gb")} placeholder="16" />
             </Field>
             <Field label="Disk (GB)" error={errors.disk_gb?.message}>
-              <Input type="number" step="0.1" {...register("disk_gb")} placeholder="500" />
+              <Input type="number" {...register("disk_gb")} placeholder="500" />
             </Field>
             <Field label="Vị trí" error={errors.location?.message}>
               <Input {...register("location")} placeholder="DC-HN" />
@@ -135,18 +144,6 @@ export function ServerFormDialog({
           <Field label="Mô tả" error={errors.description?.message}>
             <Textarea {...register("description")} placeholder="Web server tầng frontend" />
           </Field>
-
-          {isEdit ? (
-            <div className="flex items-center gap-3">
-              <Switch
-                checked={status === "on"}
-                onCheckedChange={(v) => setValue("status", v ? "on" : "off")}
-              />
-              <span className="text-sm text-ink">
-                Trạng thái: <strong>{status === "on" ? "On" : "Off"}</strong>
-              </span>
-            </div>
-          ) : null}
 
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>

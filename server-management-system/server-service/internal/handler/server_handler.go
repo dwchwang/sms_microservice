@@ -183,6 +183,22 @@ func (h *ServerHandler) GetStats(c *gin.Context) {
 	response.Success(c, http.StatusOK, "Stats retrieved", result)
 }
 
+// GetUptime handles GET /servers/uptime
+// @Summary Live uptime picture for the dashboard
+// @Tags Servers
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} response.ApiResponse
+// @Router /api/v1/servers/uptime [get]
+func (h *ServerHandler) GetUptime(c *gin.Context) {
+	result, err := h.svc.GetUptime(c.Request.Context())
+	if err != nil {
+		handleServerError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, "Uptime retrieved", result)
+}
+
 // handleServerError maps service errors to HTTP error responses using errors.Is.
 func handleServerError(c *gin.Context, err error) {
 	switch {

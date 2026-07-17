@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Server, BarChart3, Upload, RefreshCw } from "lucide-react";
-import { useServers } from "@/lib/api/hooks";
+import { useServerStats } from "@/lib/api/hooks";
 import { useAuth } from "@/providers/auth-provider";
 import { Can } from "@/components/common/can";
 import { KpiCard } from "@/components/common/kpi-card";
@@ -14,22 +14,16 @@ import { cn, orDash } from "@/lib/utils";
 const REFRESH_MS = 60_000; // auto-refresh mỗi phút
 
 function useServerCounts() {
-  const opt = { refetchInterval: REFRESH_MS };
-  const all = useServers({ page: 1, page_size: 1 }, opt);
-  const on = useServers({ page: 1, page_size: 1, status: "on" }, opt);
-  const off = useServers({ page: 1, page_size: 1, status: "off" }, opt);
+  const q = useServerStats({ refetchInterval: REFRESH_MS });
   return {
-    total: all.data?.total,
-    on: on.data?.total,
-    off: off.data?.total,
-    loading: all.isLoading || on.isLoading || off.isLoading,
-    fetching: all.isFetching || on.isFetching || off.isFetching,
-    updatedAt: all.dataUpdatedAt,
-    refetch: () => {
-      void all.refetch();
-      void on.refetch();
-      void off.refetch();
-    },
+    total: q.data?.total,
+    on: q.data?.on,
+    off: q.data?.off,
+    unknown: q.data?.unknown,
+    loading: q.isLoading,
+    fetching: q.isFetching,
+    updatedAt: q.dataUpdatedAt,
+    refetch: () => void q.refetch(),
   };
 }
 
@@ -71,10 +65,11 @@ export default function DashboardPage() {
       </div>
 
       {/* KPIs */}
-      <Can scope="server:read">
-        <div className="grid gap-4 sm:grid-cols-3">
+      <Can scope="server:stats">
+        <div className="grid gap-4 sm:grid-cols-4">
           {counts.loading ? (
             <>
+              <Skeleton className="h-28" />
               <Skeleton className="h-28" />
               <Skeleton className="h-28" />
               <Skeleton className="h-28" />
@@ -84,6 +79,7 @@ export default function DashboardPage() {
               <KpiCard label="Tổng server" value={orDash(counts.total?.toLocaleString("vi-VN"))} />
               <KpiCard label="Đang On" value={orDash(counts.on?.toLocaleString("vi-VN"))} accent="success" />
               <KpiCard label="Đang Off" value={orDash(counts.off?.toLocaleString("vi-VN"))} accent="mute" />
+              <KpiCard label="Chưa rõ" value={orDash(counts.unknown?.toLocaleString("vi-VN"))} accent="mute" />
             </>
           )}
         </div>
@@ -95,7 +91,7 @@ export default function DashboardPage() {
           <CardTitle>Thao tác nhanh</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2">
-          <Can scope="server:read">
+          <Can scope="server:list">
             <Button asChild variant="secondary">
               <Link href="/servers">
                 <Server /> Quản lý servers

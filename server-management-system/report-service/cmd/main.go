@@ -85,11 +85,12 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	reports := r.Group("/api/v1/reports")
+	// Traefik ForwardAuth proves the JWT; scopes are enforced here (design §9.10).
+	reports := r.Group("/api/v1/reports", middleware.AuthFromForwardAuth())
 	{
-		reports.GET("/summary", reportHandler.GetSummary)
-		reports.POST("", reportHandler.SendReport)
-		reports.GET("/:id", reportHandler.GetReport)
+		reports.GET("/summary", middleware.RequireScope("report:view"), reportHandler.GetSummary)
+		reports.POST("", middleware.RequireScope("report:send"), reportHandler.SendReport)
+		reports.GET("/:id", middleware.RequireScope("report:view_detail"), reportHandler.GetReport)
 	}
 
 	// Lets an operator re-run a snapshot whose 00:30 job failed, without

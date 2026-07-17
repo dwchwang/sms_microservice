@@ -3,20 +3,26 @@
   Response envelope: { status, code, message, data, meta }. `code` = HTTP status.
 */
 
+// Scopes are enforced per endpoint by RequireScope in each service.
 export type Scope =
   | "server:create"
-  | "server:read"
+  | "server:list"
+  | "server:view"
   | "server:update"
   | "server:delete"
   | "server:import"
   | "server:export"
+  | "server:stats"
   | "report:view"
   | "report:send"
-  | "user:manage"
-  | "monitor:view";
+  | "report:view_detail"
+  | "user:list"
+  | "user:manage_role";
 
 export type Role = "admin" | "operator" | "viewer";
-export type ServerStatus = "on" | "off";
+
+// UNKNOWN = never checked yet. Uppercase on the wire.
+export type ServerStatus = "ON" | "OFF" | "UNKNOWN";
 
 export interface Meta {
   request_id?: string;
@@ -55,14 +61,12 @@ export interface TokenResponse {
 
 export interface UserProfile {
   id: string;
-  username: string;
   email: string;
   full_name: string;
   role: Role;
   scopes: Scope[];
   is_active: boolean;
   created_at: string;
-  // NOTE: backend UserResponse does NOT include last_login_at.
 }
 
 export interface UserListResponse {
@@ -75,11 +79,14 @@ export interface UserListResponse {
 
 // ── Server ──
 export interface ServerResponse {
-  id: string;
   server_id: string;
   server_name: string;
   status: ServerStatus;
+  status_changed_at?: string;
+  // Read fresh from Redis at serialize time; null when unavailable.
+  last_status_check: string | null;
   ipv4: string;
+  tcp_port: number;
   os?: string;
   cpu_cores?: number;
   ram_gb?: number;
@@ -98,38 +105,31 @@ export interface ServerListResponse {
   total_pages: number;
 }
 
+export interface StatsResponse {
+  total: number;
+  on: number;
+  off: number;
+  unknown: number;
+}
+
 // ── Import / Export ──
-export type ImportStatus = "pending" | "processing" | "completed" | "failed";
-
-export interface ImportJobResponse {
-  job_id: string;
-  status: ImportStatus;
-  file_name: string;
-  message: string;
+// Import is synchronous: one request in, one full report out. No job polling.
+export interface ImportFailedItem {
+  row: number;
+  server_id: string;
+  reason: string;
 }
 
-export interface ImportJobStatusResponse {
-  job_id: string;
-  status: ImportStatus;
-  file_name: string;
-  total_rows?: number;
-  success_count?: number;
-  failed_count?: number;
-  success_list?: { server_id: string; server_name: string }[];
-  failed_list?: {
-    row_number: number;
-    server_id: string;
-    server_name: string;
-    error_reason: string;
-  }[];
-  error_message?: string;
-  started_at?: string;
-  completed_at?: string;
-  created_at?: string;
+export interface ImportResponse {
+  total_rows: number;
+  succeeded: { count: number; items: string[] };
+  failed: { count: number; items: ImportFailedItem[] };
+  skipped_duplicate: { count: number; items: string[] };
 }
 
-// ── Report ──
-// NOTE: backend ReportSummaryResponse is FLAT (verified against report-service dto).
+// ── Uptime (dashboard) ──
+// Lifetime counters kept by Monitoring in Redis. No snapshot needed, so this is
+// answerable at any moment.
 export interface ServerUptime {
   server_id: string;
   server_name: string;
@@ -138,32 +138,71 @@ export interface ServerUptime {
   on_checks: number;
 }
 
-export interface ReportSummary {
-  start_date: string;
-  end_date: string;
+export interface UptimeResponse {
   total_servers: number;
   servers_on: number;
   servers_off: number;
-  avg_uptime_pct: number;
-  total_checks: number;
-  low_uptime_servers: ServerUptime[];
+  servers_unknown: number;
+
+  servers_no_data: number;
+  servers_uptime_100: number;
+  servers_uptime_partial: number;
+  servers_uptime_0: number;
+
+  avg_uptime_pct: number | null;
+  top_10_lowest_uptime: ServerUptime[];
 }
 
-export interface SendReportResponse {
-  report_id: string;
-  status: string;
-  message: string;
+// ── Report (email / lịch sử, đọc daily_snapshots) ──
+export interface LowUptimeServer {
+  server_id: string;
+  server_name: string;
+  uptime_pct: number;
+}
+
+export interface ReportSummary {
+  start_date: string;
+  end_date: string;
+
+  total_servers: number;
+  // A snapshot at the end of the window, not a property of the whole period.
+  servers_on_at_end_at: number;
+  servers_off_at_end_at: number;
+
+  servers_uptime_100: number;
+  servers_uptime_partial: number;
+  servers_uptime_0: number;
+  servers_no_data: number;
+
+  // null when no server in the window had any data.
+  avg_uptime_pct: number | null;
+
+  expected_checks: number;
+  actual_checks: number;
+  coverage_pct: number;
+  degraded: boolean;
+
+  top_10_lowest_uptime: LowUptimeServer[];
+}
+
+export type ReportState =
+  | "processing"
+  | "generated"
+  | "sending"
+  | "sent"
+  | "failed"
+  | "delivery_unknown";
+
+export interface JobResponse {
+  id: string;
+  report_type: string;
+  state: ReportState;
+  start_date: string;
+  end_date: string;
+  recipient_email: string;
+  smtp_message_id?: string;
+  error_message?: string;
   summary?: ReportSummary;
-}
-
-// ── Monitor ──
-export interface MonitorStatus {
-  status: string;
-  service: string;
-  check_interval: string;
-  worker_count: number;
-  tcp_timeout_ms: number;
-  elasticsearch: string[];
-  index: string;
-  redis_available: boolean;
+  created_at: string;
+  sent_at?: string;
 }

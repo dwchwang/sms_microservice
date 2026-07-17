@@ -3,8 +3,9 @@
 import { useState } from "react";
 import { UploadCloud, FileSpreadsheet } from "lucide-react";
 import { toast } from "sonner";
-import { useImportServers, useImportJob } from "@/lib/api/hooks";
+import { useImportServers } from "@/lib/api/hooks";
 import { errorMessage } from "@/lib/form";
+import type { ImportResponse } from "@/lib/api/types";
 import {
   Dialog,
   DialogContent,
@@ -27,6 +28,32 @@ import { Spinner } from "@/components/common/spinner";
 
 const MAX_MB = 10;
 
+function IdList({ items, empty }: { items: string[]; empty: string }) {
+  return (
+    <div className="max-h-64 overflow-y-auto rounded-md border border-hairline">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Server ID</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {items.map((id) => (
+            <TableRow key={id}>
+              <TableCell className="font-mono text-ink">{id}</TableCell>
+            </TableRow>
+          ))}
+          {!items.length ? (
+            <TableRow>
+              <TableCell className="text-center text-mute">{empty}</TableCell>
+            </TableRow>
+          ) : null}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 export function ImportDialog({
   open,
   onOpenChange,
@@ -35,9 +62,8 @@ export function ImportDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
-  const [jobId, setJobId] = useState<string | null>(null);
+  const [result, setResult] = useState<ImportResponse | null>(null);
   const importMut = useImportServers();
-  const job = useImportJob(jobId);
 
   function pickFile(f: File | undefined) {
     if (!f) return;
@@ -56,8 +82,8 @@ export function ImportDialog({
     if (!file) return;
     try {
       const res = await importMut.mutateAsync(file);
-      setJobId(res.job_id);
-      toast.success("Đã tải lên, đang xử lý...");
+      setResult(res);
+      toast.success(`Import xong: ${res.succeeded.count}/${res.total_rows} dòng thành công`);
     } catch (err) {
       toast.error(errorMessage(err, "Import thất bại"));
     }
@@ -65,18 +91,9 @@ export function ImportDialog({
 
   function close() {
     setFile(null);
-    setJobId(null);
+    setResult(null);
     onOpenChange(false);
   }
-
-  const data = job.data;
-  const done = data?.status === "completed" || data?.status === "failed";
-  const progressLabel: Record<string, string> = {
-    pending: "Đang chờ...",
-    processing: "Đang xử lý...",
-    completed: "Hoàn tất",
-    failed: "Thất bại",
-  };
 
   return (
     <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : close())}>
@@ -84,11 +101,12 @@ export function ImportDialog({
         <DialogHeader>
           <DialogTitle>Import servers từ Excel</DialogTitle>
           <DialogDescription>
-            File .xlsx ≤ {MAX_MB}MB. Các server_id / server_name trùng sẽ bị bỏ qua.
+            File .xlsx ≤ {MAX_MB}MB. Một dòng lỗi không làm hỏng cả file — các dòng còn
+            lại vẫn được nhập.
           </DialogDescription>
         </DialogHeader>
 
-        {!jobId ? (
+        {!result ? (
           <div className="space-y-4">
             <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed border-hairline-strong/50 bg-canvas-soft px-6 py-10 text-center hover:bg-canvas-soft-2">
               <UploadCloud className="size-7 text-mute" />
@@ -118,99 +136,69 @@ export function ImportDialog({
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="flex items-center gap-3">
-              {!done ? <Spinner className="text-link" /> : null}
-              <span className="text-sm font-medium text-ink">
-                {progressLabel[data?.status ?? "pending"]}
-              </span>
+            <div className="flex flex-wrap gap-2 text-sm">
+              <Badge>Tổng: {result.total_rows}</Badge>
+              <Badge variant="success">Thành công: {result.succeeded.count}</Badge>
+              <Badge variant="error">Lỗi: {result.failed.count}</Badge>
+              <Badge variant="warning">Trùng, bỏ qua: {result.skipped_duplicate.count}</Badge>
             </div>
 
-            {data?.error_message ? (
-              <p className="rounded-sm bg-error-soft px-3 py-2 text-sm text-error-deep">
-                {data.error_message}
-              </p>
-            ) : null}
+            <Tabs defaultValue="failed">
+              <TabsList>
+                <TabsTrigger value="failed">Lỗi ({result.failed.count})</TabsTrigger>
+                <TabsTrigger value="skipped">
+                  Trùng ({result.skipped_duplicate.count})
+                </TabsTrigger>
+                <TabsTrigger value="succeeded">
+                  Thành công ({result.succeeded.count})
+                </TabsTrigger>
+              </TabsList>
 
-            {done && data ? (
-              <>
-                <div className="flex flex-wrap gap-2 text-sm">
-                  <Badge>Tổng: {data.total_rows ?? 0}</Badge>
-                  <Badge variant="success">Thành công: {data.success_count ?? 0}</Badge>
-                  <Badge variant="error">Thất bại: {data.failed_count ?? 0}</Badge>
+              <TabsContent value="failed" className="mt-3">
+                <div className="max-h-64 overflow-y-auto rounded-md border border-hairline">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Dòng</TableHead>
+                        <TableHead>Server ID</TableHead>
+                        <TableHead>Lý do</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {result.failed.items.map((r, i) => (
+                        <TableRow key={`${r.row}-${i}`}>
+                          <TableCell className="font-mono">{r.row}</TableCell>
+                          <TableCell className="font-mono text-ink">{r.server_id}</TableCell>
+                          <TableCell className="font-mono text-error-deep">{r.reason}</TableCell>
+                        </TableRow>
+                      ))}
+                      {!result.failed.items.length ? (
+                        <TableRow>
+                          <TableCell colSpan={3} className="text-center text-mute">
+                            Không có dòng lỗi
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+                    </TableBody>
+                  </Table>
                 </div>
+              </TabsContent>
 
-                <Tabs defaultValue="failed">
-                  <TabsList>
-                    <TabsTrigger value="failed">Lỗi ({data.failed_list?.length ?? 0})</TabsTrigger>
-                    <TabsTrigger value="success">
-                      Thành công ({data.success_list?.length ?? 0})
-                    </TabsTrigger>
-                  </TabsList>
+              <TabsContent value="skipped" className="mt-3">
+                <IdList
+                  items={result.skipped_duplicate.items}
+                  empty="Không có dòng trùng"
+                />
+              </TabsContent>
 
-                  <TabsContent value="failed" className="mt-3">
-                    <div className="max-h-64 overflow-y-auto rounded-md border border-hairline">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Dòng</TableHead>
-                            <TableHead>Server ID</TableHead>
-                            <TableHead>Lý do</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {(data.failed_list ?? []).map((r, i) => (
-                            <TableRow key={i}>
-                              <TableCell className="font-mono">{r.row_number}</TableCell>
-                              <TableCell className="font-mono text-ink">{r.server_id}</TableCell>
-                              <TableCell className="text-error-deep">{r.error_reason}</TableCell>
-                            </TableRow>
-                          ))}
-                          {!data.failed_list?.length ? (
-                            <TableRow>
-                              <TableCell colSpan={3} className="text-center text-mute">
-                                Không có dòng lỗi
-                              </TableCell>
-                            </TableRow>
-                          ) : null}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </TabsContent>
+              <TabsContent value="succeeded" className="mt-3">
+                <IdList items={result.succeeded.items} empty="Không có dòng nào được nhập" />
+              </TabsContent>
+            </Tabs>
 
-                  <TabsContent value="success" className="mt-3">
-                    <div className="max-h-64 overflow-y-auto rounded-md border border-hairline">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Server ID</TableHead>
-                            <TableHead>Tên</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {(data.success_list ?? []).map((r, i) => (
-                            <TableRow key={i}>
-                              <TableCell className="font-mono text-ink">{r.server_id}</TableCell>
-                              <TableCell>{r.server_name}</TableCell>
-                            </TableRow>
-                          ))}
-                          {!data.success_list?.length ? (
-                            <TableRow>
-                              <TableCell colSpan={2} className="text-center text-mute">
-                                Không có
-                              </TableCell>
-                            </TableRow>
-                          ) : null}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </TabsContent>
-                </Tabs>
-
-                <div className="flex justify-end">
-                  <Button onClick={close}>Đóng</Button>
-                </div>
-              </>
-            ) : null}
+            <div className="flex justify-end">
+              <Button onClick={close}>Đóng</Button>
+            </div>
           </div>
         )}
       </DialogContent>

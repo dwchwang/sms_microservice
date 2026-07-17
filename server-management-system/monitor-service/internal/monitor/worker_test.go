@@ -10,7 +10,7 @@ import (
 )
 
 func newTestPool(ops RedisOps, pinger Pinger, sink FactSink, workers int) *Pool {
-	return NewPool(ops, pinger, sink, workers, zerolog.New(io.Discard))
+	return NewPool(ops, pinger, sink, nil, workers, zerolog.New(io.Discard))
 }
 
 func TestCheck_ReportsServerUp(t *testing.T) {
