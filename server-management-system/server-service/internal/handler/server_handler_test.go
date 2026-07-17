@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	"github.com/vcs-sms/server-service/internal/dto"
 	"github.com/vcs-sms/server-service/internal/service"
+	ipvalidator "github.com/vcs-sms/server-service/internal/validator"
+	apperrors "github.com/vcs-sms/shared/errors"
 )
 
 // mockServerService implements service.ServerService for testing.
@@ -24,6 +28,12 @@ type mockServerService struct {
 	updateResult *dto.ServerResponse
 	updateErr    error
 	deleteErr    error
+	statsResult  *dto.StatsResponse
+	statsErr     error
+}
+
+func (m *mockServerService) GetStats(ctx context.Context) (*dto.StatsResponse, error) {
+	return m.statsResult, m.statsErr
 }
 
 func (m *mockServerService) CreateServer(ctx context.Context, req *dto.CreateServerRequest) (*dto.ServerResponse, error) {
@@ -111,6 +121,26 @@ func TestCreateServerHandler_Conflict(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateServerHandler_IPNotAllowed(t *testing.T) {
+	mock := &mockServerService{createErr: ipvalidator.ErrIPNotAllowed}
+	handler := NewServerHandler(mock)
+	router := setupServerTestRouter(handler)
+
+	body := `{"server_id":"SRV-001","server_name":"test-server","ipv4":"127.0.0.1"}`
+	req, _ := http.NewRequest("POST", "/api/v1/servers", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), apperrors.CodeServerIPNotAllowed) {
+		t.Errorf("expected %s in body, got %s", apperrors.CodeServerIPNotAllowed, w.Body.String())
 	}
 }
 
@@ -366,4 +396,45 @@ type assertErr struct{}
 
 func (assertErr) Error() string {
 	return "service failed"
+}
+
+func TestGetStatsHandler_Success(t *testing.T) {
+	mock := &mockServerService{statsResult: &dto.StatsResponse{Total: 4, On: 2, Off: 1, Unknown: 1}}
+	handler := NewServerHandler(mock)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/v1/servers/stats", handler.GetStats)
+
+	req, _ := http.NewRequest("GET", "/api/v1/servers/stats", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Data dto.StatsResponse `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if env.Data.On != 2 || env.Data.Total != 4 {
+		t.Errorf("unexpected stats %#v", env.Data)
+	}
+}
+
+func TestGetStatsHandler_ServiceError(t *testing.T) {
+	mock := &mockServerService{statsErr: errors.New("db down")}
+	handler := NewServerHandler(mock)
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/v1/servers/stats", handler.GetStats)
+
+	req, _ := http.NewRequest("GET", "/api/v1/servers/stats", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want 500", w.Code)
+	}
 }

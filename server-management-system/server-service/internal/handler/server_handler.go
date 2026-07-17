@@ -9,6 +9,7 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/vcs-sms/server-service/internal/dto"
 	"github.com/vcs-sms/server-service/internal/service"
+	ipvalidator "github.com/vcs-sms/server-service/internal/validator"
 	apperrors "github.com/vcs-sms/shared/errors"
 	"github.com/vcs-sms/shared/response"
 )
@@ -166,6 +167,22 @@ func (h *ServerHandler) DeleteServer(c *gin.Context) {
 	response.Success(c, http.StatusOK, "Server deleted successfully", nil)
 }
 
+// GetStats handles GET /servers/stats
+// @Summary Current status breakdown for the dashboard
+// @Tags Servers
+// @Produce json
+// @Security BearerAuth
+// @Success 200 {object} response.ApiResponse
+// @Router /api/v1/servers/stats [get]
+func (h *ServerHandler) GetStats(c *gin.Context) {
+	result, err := h.svc.GetStats(c.Request.Context())
+	if err != nil {
+		handleServerError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, "Stats retrieved", result)
+}
+
 // handleServerError maps service errors to HTTP error responses using errors.Is.
 func handleServerError(c *gin.Context, err error) {
 	switch {
@@ -173,6 +190,9 @@ func handleServerError(c *gin.Context, err error) {
 		response.Conflict(c, apperrors.ErrConflict.Message)
 	case errors.Is(err, service.ErrServerNotFound):
 		response.NotFound(c, apperrors.ErrNotFound.Message)
+	case errors.Is(err, ipvalidator.ErrIPNotAllowed):
+		response.ErrorWithCode(c, http.StatusUnprocessableEntity,
+			apperrors.CodeServerIPNotAllowed, "IPv4 is not an allowed monitoring target")
 	default:
 		response.InternalError(c, apperrors.ErrInternalServer.Message)
 	}

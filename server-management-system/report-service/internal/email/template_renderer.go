@@ -2,54 +2,86 @@ package email
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"html/template"
-	"path/filepath"
-	"runtime"
 
 	"github.com/vcs-sms/report-service/internal/dto"
 )
 
-// ReportData holds the data for rendering the daily report HTML email.
-type ReportData struct {
-	ReportDate       string
-	TotalServers     int
-	ServersOn        int
-	ServersOff       int
-	AvgUptimePct     float64
-	LowUptimeServers []dto.ServerUptime
+//go:embed templates/daily_report.html
+var dailyReportHTML string
+
+// Renderer turns a report summary into an email body.
+type Renderer interface {
+	Render(summary *dto.SummaryResponse) (subject, html string, err error)
 }
 
-var dailyReportTemplatePathOverride func() (string, error)
-
-func resolveDailyReportTemplatePath() (string, error) {
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		return "", fmt.Errorf("failed to get caller information")
-	}
-	return filepath.Join(filepath.Dir(filename), "templates", "daily_report.html"), nil
+type renderer struct {
+	tmpl *template.Template
 }
 
-// RenderDailyReport renders the daily report HTML email template.
-func RenderDailyReport(data *ReportData) (string, error) {
-	// Get the path to the template file relative to this source file
-	templatePath, err := resolveDailyReportTemplatePath()
-	if dailyReportTemplatePathOverride != nil {
-		templatePath, err = dailyReportTemplatePathOverride()
-	}
+// NewRenderer compiles the report template.
+func NewRenderer() (Renderer, error) {
+	tmpl, err := template.New("daily_report").Funcs(template.FuncMap{
+		"pct":      formatPct,
+		"optPct":   formatOptPct,
+		"thousand": formatThousand,
+		"date":     formatDate,
+	}).Parse(dailyReportHTML)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("failed to parse report template: %w", err)
 	}
+	return &renderer{tmpl: tmpl}, nil
+}
 
-	tmpl, err := template.ParseFiles(templatePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse template: %w", err)
+// Render builds the subject and HTML body.
+func (r *renderer) Render(summary *dto.SummaryResponse) (string, string, error) {
+	subject := fmt.Sprintf("Báo cáo VCS-SMS — ngày %s", formatDate(summary.EndDate))
+	if summary.StartDate != summary.EndDate {
+		subject = fmt.Sprintf("Báo cáo VCS-SMS — %s đến %s",
+			formatDate(summary.StartDate), formatDate(summary.EndDate))
 	}
 
 	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("failed to render template: %w", err)
+	if err := r.tmpl.Execute(&buf, summary); err != nil {
+		return "", "", fmt.Errorf("failed to render report template: %w", err)
 	}
+	return subject, buf.String(), nil
+}
 
-	return buf.String(), nil
+// formatDate turns 2026-07-15 into 15/07/2026.
+func formatDate(iso string) string {
+	if len(iso) != 10 {
+		return iso
+	}
+	return fmt.Sprintf("%s/%s/%s", iso[8:10], iso[5:7], iso[0:4])
+}
+
+func formatPct(v float64) string {
+	return fmt.Sprintf("%.1f%%", v)
+}
+
+// formatOptPct renders a dash rather than 0% when uptime is unknown, so a
+// collection gap never reads as an outage.
+func formatOptPct(v *float64) string {
+	if v == nil {
+		return "—"
+	}
+	return formatPct(*v)
+}
+
+func formatThousand(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	if n < 0 {
+		return s
+	}
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, '.')
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }

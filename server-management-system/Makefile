@@ -39,14 +39,12 @@ test: ## Run all tests with coverage
 	cd monitor-service && go test ./... -cover -count=1 -v
 	@echo "=== Testing report-service ==="
 	cd report-service && go test ./... -cover -count=1 -v
-	@echo "=== Testing fileio-service ==="
-	cd fileio-service && go test ./... -cover -count=1 -v
 	@echo "=== Testing tcp-simulator ==="
 	cd tcp-simulator && go test ./... -cover -count=1 -v
 	@echo "All tests completed."
 
 coverage: ## Generate HTML coverage reports
-	@for svc in shared auth-service server-service monitor-service report-service fileio-service tcp-simulator; do \
+	@for svc in shared auth-service server-service monitor-service report-service tcp-simulator; do \
 		echo ">>> $$svc coverage:"; \
 		cd $$svc && go test ./... -coverprofile=coverage.out -covermode=atomic -count=1; \
 		go tool cover -func=coverage.out | tail -1; \
@@ -69,11 +67,13 @@ deps: ## Install all dependencies
 	cd server-service && go mod tidy
 	cd monitor-service && go mod tidy
 	cd report-service && go mod tidy
-	cd fileio-service && go mod tidy
 	cd tcp-simulator && go mod tidy
 
 # ── Run ──
-seed: ## Seed 10.000 servers into PostgreSQL
+rebuild-cache: ## Rebuild the Redis monitor target projection from PostgreSQL
+	docker compose exec server-service ./server-service rebuild-monitor-cache
+
+seed: ## Seed 10.000 servers into PostgreSQL (run rebuild-cache afterwards)
 	docker exec -it vcs-sms-postgres sh -c 'psql -U "$${POSTGRES_USER:-postgres}" -d "server_db" -f /seed/seed_10k_servers.sql'
 
 logs: ## Tail all service logs

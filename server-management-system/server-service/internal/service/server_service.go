@@ -8,9 +8,14 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
+	"github.com/vcs-sms/server-service/internal/cache"
 	"github.com/vcs-sms/server-service/internal/dto"
 	"github.com/vcs-sms/server-service/internal/model"
+	"github.com/vcs-sms/server-service/internal/projection"
 	"github.com/vcs-sms/server-service/internal/repository"
+	"github.com/vcs-sms/server-service/internal/status"
+	"github.com/vcs-sms/server-service/internal/validator"
 	"gorm.io/gorm"
 )
 
@@ -21,18 +26,30 @@ type ServerService interface {
 	ListServers(ctx context.Context, filter *dto.ServerFilter) (*dto.ListServerResponse, error)
 	UpdateServer(ctx context.Context, serverID string, req *dto.UpdateServerRequest) (*dto.ServerResponse, error)
 	DeleteServer(ctx context.Context, serverID string) error
+	GetStats(ctx context.Context) (*dto.StatsResponse, error)
 }
+
+const (
+	// cacheTTL is a second layer behind list_version invalidation.
+	cacheTTL = 30 * time.Second
+
+	statsCacheKey = "server:stats:cache"
+	statsCacheTTL = 10 * time.Second
+)
 
 // serverServiceImpl implements ServerService.
 type serverServiceImpl struct {
-	repo  repository.ServerRepository
-	cache serverCache
+	repo      repository.ServerRepository
+	cache     serverCache
+	cidr      *validator.CIDRValidator
+	targets   projection.TargetProjection
+	lastCheck status.LastCheckReader
+	log       zerolog.Logger
 }
 
 type serverCache interface {
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error
-	Del(ctx context.Context, keys ...string) error
 	Incr(ctx context.Context, key string) error
 }
 
@@ -48,28 +65,39 @@ func (r *redisServerCache) Set(ctx context.Context, key string, value interface{
 	return r.client.Set(ctx, key, value, expiration).Err()
 }
 
-func (r *redisServerCache) Del(ctx context.Context, keys ...string) error {
-	return r.client.Del(ctx, keys...).Err()
-}
-
 func (r *redisServerCache) Incr(ctx context.Context, key string) error {
 	return r.client.Incr(ctx, key).Err()
 }
 
 // NewServerService creates a new ServerService instance.
-func NewServerService(repo repository.ServerRepository, rdb *redis.Client) ServerService {
+func NewServerService(
+	repo repository.ServerRepository,
+	rdb *redis.Client,
+	cidr *validator.CIDRValidator,
+	targets projection.TargetProjection,
+	lastCheck status.LastCheckReader,
+	log zerolog.Logger,
+) ServerService {
 	var cache serverCache
 	if rdb != nil {
 		cache = &redisServerCache{client: rdb}
 	}
 	return &serverServiceImpl{
-		repo:  repo,
-		cache: cache,
+		repo:      repo,
+		cache:     cache,
+		cidr:      cidr,
+		targets:   targets,
+		lastCheck: lastCheck,
+		log:       log,
 	}
 }
 
-// CreateServer creates a new server and publishes a kafka event.
+// CreateServer creates a new server.
 func (s *serverServiceImpl) CreateServer(ctx context.Context, req *dto.CreateServerRequest) (*dto.ServerResponse, error) {
+	if err := s.cidr.Validate(req.IPv4); err != nil {
+		return nil, err
+	}
+
 	// 1. Validate — check uniqueness
 	exists, err := s.repo.ExistsByServerID(ctx, req.ServerID)
 	if err != nil {
@@ -101,9 +129,9 @@ func (s *serverServiceImpl) CreateServer(ctx context.Context, req *dto.CreateSer
 		IPv4:        req.IPv4,
 		TCPPort:     tcpPort,
 		OS:          req.OS,
-		CPUCores:    req.CPUCores,
-		RAMGB:       req.RAMGB,
-		DiskGB:      req.DiskGB,
+		CPUCores:    optionalInt(req.CPUCores),
+		RAMGB:       optionalInt(req.RAMGB),
+		DiskGB:      optionalInt(req.DiskGB),
 		Location:    req.Location,
 		Description: req.Description,
 		CreatedAt:   now,
@@ -115,8 +143,9 @@ func (s *serverServiceImpl) CreateServer(ctx context.Context, req *dto.CreateSer
 		return nil, fmt.Errorf("failed to create server: %w", err)
 	}
 
-	// 4. Invalidate cache
-	s.invalidateCache(ctx, req.ServerID)
+	// 4. Sync monitoring projection and invalidate cache
+	s.syncTarget(ctx, server)
+	s.bumpListVersion(ctx)
 
 	return mapServerToResponse(server), nil
 }
@@ -124,13 +153,15 @@ func (s *serverServiceImpl) CreateServer(ctx context.Context, req *dto.CreateSer
 // GetServer retrieves a server by ID, with Redis cache.
 func (s *serverServiceImpl) GetServer(ctx context.Context, serverID string) (*dto.ServerResponse, error) {
 	// 1. Check Redis cache
-	cacheKey := fmt.Sprintf("server:detail:%s", serverID)
+	cacheKey := buildDetailCacheKey(serverID, s.getListVersion(ctx))
 	if s.cache != nil {
 		cached, err := s.cache.Get(ctx, cacheKey)
 		if err == nil {
 			var resp dto.ServerResponse
 			if err := json.Unmarshal([]byte(cached), &resp); err == nil {
-				return &resp, nil
+				single := []dto.ServerResponse{resp}
+				s.enrichLastCheck(ctx, single)
+				return &single[0], nil
 			}
 		}
 	}
@@ -144,14 +175,16 @@ func (s *serverServiceImpl) GetServer(ctx context.Context, serverID string) (*dt
 		return nil, fmt.Errorf("failed to get server: %w", err)
 	}
 
-	// 3. Cache result
+	// 3. Cache result, then enrich so last_status_check stays out of the cache
 	resp := mapServerToResponse(server)
 	if s.cache != nil {
 		data, _ := json.Marshal(resp)
-		_ = s.cache.Set(ctx, cacheKey, data, 5*time.Minute)
+		_ = s.cache.Set(ctx, cacheKey, data, cacheTTL)
 	}
 
-	return resp, nil
+	single := []dto.ServerResponse{*resp}
+	s.enrichLastCheck(ctx, single)
+	return &single[0], nil
 }
 
 // ListServers retrieves servers with filtering and pagination, with Redis cache.
@@ -166,6 +199,7 @@ func (s *serverServiceImpl) ListServers(ctx context.Context, filter *dto.ServerF
 		if err == nil {
 			var resp dto.ListServerResponse
 			if err := json.Unmarshal([]byte(cached), &resp); err == nil {
+				s.enrichLastCheck(ctx, resp.Servers)
 				return &resp, nil
 			}
 		}
@@ -204,17 +238,24 @@ func (s *serverServiceImpl) ListServers(ctx context.Context, filter *dto.ServerF
 		TotalPages: totalPages,
 	}
 
-	// 5. Cache result
+	// 5. Cache result, then enrich so last_status_check stays out of the cache
 	if s.cache != nil {
 		data, _ := json.Marshal(resp)
-		_ = s.cache.Set(ctx, cacheKey, data, 2*time.Minute)
+		_ = s.cache.Set(ctx, cacheKey, data, cacheTTL)
 	}
 
+	s.enrichLastCheck(ctx, resp.Servers)
 	return resp, nil
 }
 
 // UpdateServer modifies an existing server.
 func (s *serverServiceImpl) UpdateServer(ctx context.Context, serverID string, req *dto.UpdateServerRequest) (*dto.ServerResponse, error) {
+	if req.IPv4 != nil {
+		if err := s.cidr.Validate(*req.IPv4); err != nil {
+			return nil, err
+		}
+	}
+
 	// 1. Find existing server
 	server, err := s.repo.FindByServerID(ctx, serverID)
 	if err != nil {
@@ -244,13 +285,13 @@ func (s *serverServiceImpl) UpdateServer(ctx context.Context, serverID string, r
 		server.OS = *req.OS
 	}
 	if req.CPUCores != nil {
-		server.CPUCores = *req.CPUCores
+		server.CPUCores = req.CPUCores
 	}
 	if req.RAMGB != nil {
-		server.RAMGB = *req.RAMGB
+		server.RAMGB = req.RAMGB
 	}
 	if req.DiskGB != nil {
-		server.DiskGB = *req.DiskGB
+		server.DiskGB = req.DiskGB
 	}
 	if req.Location != nil {
 		server.Location = *req.Location
@@ -265,8 +306,9 @@ func (s *serverServiceImpl) UpdateServer(ctx context.Context, serverID string, r
 		return nil, fmt.Errorf("failed to update server: %w", err)
 	}
 
-	// 4. Invalidate cache
-	s.invalidateCache(ctx, serverID)
+	// 4. Sync monitoring projection and invalidate cache
+	s.syncTarget(ctx, server)
+	s.bumpListVersion(ctx)
 
 	return mapServerToResponse(server), nil
 }
@@ -287,8 +329,9 @@ func (s *serverServiceImpl) DeleteServer(ctx context.Context, serverID string) e
 		return fmt.Errorf("failed to delete server: %w", err)
 	}
 
-	// 3. Invalidate cache
-	s.invalidateCache(ctx, serverID)
+	// 3. Remove from monitoring projection and invalidate cache
+	s.removeTarget(ctx, serverID)
+	s.bumpListVersion(ctx)
 
 	return nil
 }
@@ -296,14 +339,14 @@ func (s *serverServiceImpl) DeleteServer(ctx context.Context, serverID string) e
 // bumpListVersion increments the cache version for list queries.
 func (s *serverServiceImpl) bumpListVersion(ctx context.Context) {
 	if s.cache != nil {
-		_ = s.cache.Incr(ctx, "server:list:version")
+		_ = s.cache.Incr(ctx, cache.ListVersionKey)
 	}
 }
 
 // getListVersion gets the current cache version for list queries.
 func (s *serverServiceImpl) getListVersion(ctx context.Context) string {
 	if s.cache != nil {
-		ver, err := s.cache.Get(ctx, "server:list:version")
+		ver, err := s.cache.Get(ctx, cache.ListVersionKey)
 		if err == nil {
 			return ver
 		}
@@ -311,13 +354,104 @@ func (s *serverServiceImpl) getListVersion(ctx context.Context) string {
 	return "0"
 }
 
-// invalidateCache removes related Redis cache entries and bumps list version.
-func (s *serverServiceImpl) invalidateCache(ctx context.Context, serverID string) {
-	if s.cache == nil {
+// GetStats returns the live status breakdown, cached briefly since a dashboard
+// polls it far more often than statuses actually change.
+func (s *serverServiceImpl) GetStats(ctx context.Context) (*dto.StatsResponse, error) {
+	if s.cache != nil {
+		if cached, err := s.cache.Get(ctx, statsCacheKey); err == nil {
+			var resp dto.StatsResponse
+			if err := json.Unmarshal([]byte(cached), &resp); err == nil {
+				return &resp, nil
+			}
+		}
+	}
+
+	counts, err := s.repo.CountByStatus(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to count servers by status: %w", err)
+	}
+
+	resp := &dto.StatsResponse{
+		On:      counts["ON"],
+		Off:     counts["OFF"],
+		Unknown: counts["UNKNOWN"],
+	}
+	resp.Total = resp.On + resp.Off + resp.Unknown
+
+	if s.cache != nil {
+		data, _ := json.Marshal(resp)
+		_ = s.cache.Set(ctx, statsCacheKey, data, statsCacheTTL)
+	}
+	return resp, nil
+}
+
+// enrichLastCheck fills last_status_check from Redis. It runs outside the cache
+// on purpose: the value changes every round, so caching it would either serve
+// stale data or force the cache to be invalidated every 60 seconds.
+func (s *serverServiceImpl) enrichLastCheck(ctx context.Context, servers []dto.ServerResponse) {
+	if s.lastCheck == nil || len(servers) == 0 {
 		return
 	}
-	_ = s.cache.Del(ctx, fmt.Sprintf("server:detail:%s", serverID))
-	s.bumpListVersion(ctx)
+	ids := make([]string, len(servers))
+	for i := range servers {
+		ids[i] = servers[i].ServerID
+	}
+	checked := s.lastCheck.LastCheckedAt(ctx, ids)
+	for i := range servers {
+		if ts, ok := checked[servers[i].ServerID]; ok {
+			servers[i].LastStatusCheck = &ts
+		}
+	}
+}
+
+// syncTarget updates the monitoring projection. PostgreSQL is the source of
+// truth, so a Redis failure is logged for reconciliation, not returned.
+func (s *serverServiceImpl) syncTarget(ctx context.Context, server *model.Server) {
+	if s.targets == nil {
+		return
+	}
+	target := projection.Target{
+		ServerID:   server.ServerID,
+		ServerName: server.ServerName,
+		IPv4:       server.IPv4,
+		TCPPort:    server.TCPPort,
+	}
+	if err := s.targets.Sync(ctx, target); err != nil {
+		s.log.Error().Err(err).Str("server_id", server.ServerID).
+			Msg("Failed to sync monitor target projection")
+	}
+}
+
+// removeTarget drops the server from the monitoring projection.
+func (s *serverServiceImpl) removeTarget(ctx context.Context, serverID string) {
+	if s.targets == nil {
+		return
+	}
+	if err := s.targets.Delete(ctx, serverID); err != nil {
+		s.log.Error().Err(err).Str("server_id", serverID).
+			Msg("Failed to remove monitor target projection")
+	}
+}
+
+// optionalInt maps an absent (zero) request value onto a NULL column.
+func optionalInt(v int) *int {
+	if v == 0 {
+		return nil
+	}
+	return &v
+}
+
+// derefInt renders a NULL column as 0, which the response omits.
+func derefInt(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+// buildDetailCacheKey creates a versioned cache key for a single server.
+func buildDetailCacheKey(serverID, version string) string {
+	return fmt.Sprintf("server:detail:cache:%s:%s", serverID, version)
 }
 
 // mapServerToResponse converts a model.Server to a dto.ServerResponse.
@@ -330,9 +464,9 @@ func mapServerToResponse(s *model.Server) *dto.ServerResponse {
 		IPv4:            s.IPv4,
 		TCPPort:         s.TCPPort,
 		OS:              s.OS,
-		CPUCores:        s.CPUCores,
-		RAMGB:           s.RAMGB,
-		DiskGB:          s.DiskGB,
+		CPUCores:        derefInt(s.CPUCores),
+		RAMGB:           derefInt(s.RAMGB),
+		DiskGB:          derefInt(s.DiskGB),
 		Location:        s.Location,
 		Description:     s.Description,
 		CreatedAt:       s.CreatedAt,
@@ -346,5 +480,5 @@ func buildListCacheKey(f *dto.ServerFilter, version string) string {
 		f.Status, f.ServerID, f.ServerName, f.IPv4, f.OS, f.Location,
 		f.SortBy, f.SortOrder, f.Page, f.PageSize,
 	)
-	return fmt.Sprintf("servers:list:%s:%x", version, sha256.Sum256([]byte(data)))
+	return fmt.Sprintf("server:list:cache:%x:%s", sha256.Sum256([]byte(data)), version)
 }

@@ -12,6 +12,13 @@ type Config struct {
 	Database DatabaseConfig
 	Redis    RedisConfig
 	Log      LogConfig
+	Security SecurityConfig
+}
+
+// SecurityConfig holds security-related configuration.
+type SecurityConfig struct {
+	// Comma-separated networks allowed as monitoring targets; empty denies all.
+	CIDRAllowlist string `env:"SERVER_CIDR_ALLOWLIST"`
 }
 
 // AppConfig holds application-level configuration.
@@ -87,6 +94,8 @@ func LoadConfig() *Config {
 	viper.SetDefault("REDIS_PASSWORD", "")
 	viper.SetDefault("REDIS_DB", 1)
 
+	viper.SetDefault("SERVER_CIDR_ALLOWLIST", "")
+
 	viper.SetDefault("LOG_LEVEL", "debug")
 	viper.SetDefault("LOG_DIR", "logs/server")
 	viper.SetDefault("LOG_MAX_SIZE", 100)
@@ -121,6 +130,9 @@ func LoadConfig() *Config {
 			MaxBackups: viper.GetInt("LOG_MAX_BACKUPS"),
 			MaxAge:     viper.GetInt("LOG_MAX_AGE"),
 			Compress:   viper.GetBool("LOG_COMPRESS"),
+		},
+		Security: SecurityConfig{
+			CIDRAllowlist: viper.GetString("SERVER_CIDR_ALLOWLIST"),
 		},
 	}
 }

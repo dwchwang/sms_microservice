@@ -14,9 +14,9 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./deployments/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./deployments/docker/postgres/init-v2.sql:/docker-entrypoint-initdb.d/02-init-v2.sql
-      - ./deployments/docker/postgres/seed_10k_servers.sql:/docker-entrypoint-initdb.d/03-seed.sql:ro
+      - ./deployments/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      # Not auto-run: 10.000 rows are for load testing only. Use `make seed`,
+      # then `make rebuild-cache` so Monitoring can see the targets.
       - ./deployments/docker/postgres/seed_10k_servers.sql:/seed/seed_10k_servers.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vcs_admin} -d ${POSTGRES_DB:-vcs_sms}"]
@@ -90,7 +90,7 @@ services:
       retries: 5
 
   # ═══════════════════════════════════════
-  # Application Services (commented out in dev)
+  # Application Services
   # ═══════════════════════════════════════
 
   traefik:
@@ -161,9 +161,9 @@ services:
       - .env
     environment:
       - MONITOR_TCP_DIAL_HOST=tcp-simulator
+    # No postgres: Monitoring reads the Redis target projection and writes
+    # Redis status plus Elasticsearch facts.
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       elasticsearch:
@@ -184,31 +184,16 @@ services:
       - "${REPORT_PORT:-8084}:8084"
     env_file:
       - .env
+    # The snapshot job reads the population from Server Service.
     depends_on:
       postgres:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
+      server-service:
+        condition: service_started
     volumes:
       - ./logs/report:/var/log/vcs-sms
-    networks:
-      - vcs-network
-
-  fileio-service:
-    build:
-      context: .
-      dockerfile: fileio-service/Dockerfile
-    container_name: vcs-sms-fileio
-    ports:
-      - "${FILEIO_PORT:-8085}:8085"
-    env_file:
-      - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./logs/fileio:/var/log/vcs-sms
-      - ./uploads:/app/uploads
     networks:
       - vcs-network
 

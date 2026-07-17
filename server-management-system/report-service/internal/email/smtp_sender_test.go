@@ -1,114 +1,284 @@
 package email
 
 import (
-	"context"
 	"crypto/tls"
-	"fmt"
+	"errors"
+	"net/smtp"
+	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/vcs-sms/report-service/config"
-	"gopkg.in/gomail.v2"
 )
 
-type fakeSMTPDialer struct {
-	sendFunc func(...*gomail.Message) error
+var errNetwork = errors.New("connection reset by peer")
+
+// fakeClient fails at whichever step is named, so each branch of the send
+// sequence can be exercised.
+type fakeClient struct {
+	failAt   string
+	steps    []string
+	body     strings.Builder
+	quitCall bool
 }
 
-func (d *fakeSMTPDialer) DialAndSend(messages ...*gomail.Message) error {
-	if d.sendFunc != nil {
-		return d.sendFunc(messages...)
+func (c *fakeClient) step(name string) error {
+	c.steps = append(c.steps, name)
+	if c.failAt == name {
+		return errNetwork
 	}
 	return nil
 }
 
-func withFakeDialer(t *testing.T, factory func(host string, port int, username, password string, tlsConfig *tls.Config) smtpDialer) {
-	t.Helper()
-	original := newSMTPDialerOverride
-	newSMTPDialerOverride = factory
-	t.Cleanup(func() {
-		newSMTPDialerOverride = original
-	})
+func (c *fakeClient) StartTLS(*tls.Config) error { return c.step("starttls") }
+func (c *fakeClient) Auth(smtp.Auth) error       { return c.step("auth") }
+func (c *fakeClient) Mail(string) error          { return c.step("mail") }
+func (c *fakeClient) Rcpt(string) error          { return c.step("rcpt") }
+func (c *fakeClient) Close() error               { return nil }
+
+func (c *fakeClient) Quit() error {
+	c.quitCall = true
+	return c.step("quit")
 }
 
-func TestGmailSender_SendHTMLSuccess(t *testing.T) {
-	var capturedHost string
-	var capturedPort int
-	var capturedTLSConfig *tls.Config
-	var sentMessages int
+func (c *fakeClient) Data() (writeCloser, error) {
+	if err := c.step("data"); err != nil {
+		return nil, err
+	}
+	return &fakeWriter{client: c}, nil
+}
 
-	withFakeDialer(t, func(host string, port int, username, password string, tlsConfig *tls.Config) smtpDialer {
-		capturedHost = host
-		capturedPort = port
-		capturedTLSConfig = tlsConfig
-		return &fakeSMTPDialer{
-			sendFunc: func(messages ...*gomail.Message) error {
-				sentMessages = len(messages)
-				return nil
-			},
+type fakeWriter struct {
+	client *fakeClient
+}
+
+func (w *fakeWriter) Write(p []byte) (int, error) {
+	if err := w.client.step("write"); err != nil {
+		return 0, err
+	}
+	w.client.body.Write(p)
+	return len(p), nil
+}
+
+func (w *fakeWriter) Close() error { return w.client.step("close") }
+
+func newTestSender(failAt, domains string) (*GmailSender, *fakeClient) {
+	client := &fakeClient{failAt: failAt}
+	s := NewGmailSender("smtp.gmail.com", 587, "u@gmail.com", "pw", "u@gmail.com", domains)
+	s.dial = func(string) (smtpClient, error) { return client, nil }
+	return s, client
+}
+
+func testMessage() Message {
+	return Message{To: "ops@example.com", Subject: "Báo cáo VCS-SMS", HTML: "<p>hi</p>"}
+}
+
+func TestSend_Success(t *testing.T) {
+	s, client := newTestSender("", "")
+
+	id, err := s.Send(testMessage())
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if id == "" || !strings.HasPrefix(id, "<") {
+		t.Errorf("Message-ID = %q, want an RFC 5322 id", id)
+	}
+	want := "starttls,auth,mail,rcpt,data,write,close,quit"
+	if got := strings.Join(client.steps, ","); got != want {
+		t.Errorf("steps = %q, want %q", got, want)
+	}
+	if !strings.Contains(client.body.String(), "Message-ID: "+id) {
+		t.Error("the Message-ID was not stamped on the message")
+	}
+}
+
+// Anything that fails before the body is on the wire is a clean rejection:
+// the mail definitely did not go out.
+func TestSend_FailureBeforeDataIsUnambiguous(t *testing.T) {
+	for _, step := range []string{"starttls", "auth", "mail", "rcpt", "data"} {
+		s, _ := newTestSender(step, "")
+
+		_, err := s.Send(testMessage())
+
+		if err == nil {
+			t.Errorf("%s: expected an error", step)
+			continue
 		}
-	})
-
-	sender := NewGmailSender(config.SMTPConfig{
-		Host:     "smtp.gmail.com",
-		Port:     587,
-		Username: "user@gmail.com",
-		Password: "app-password",
-		From:     "VCS-SMS <user@gmail.com>",
-	})
-
-	err := sender.SendHTML(context.Background(), "admin@test.com", "Subject", "<h1>Body</h1>")
-
-	assert.NoError(t, err)
-	assert.Equal(t, "smtp.gmail.com", capturedHost)
-	assert.Equal(t, 587, capturedPort)
-	assert.NotNil(t, capturedTLSConfig)
-	assert.Equal(t, uint16(tls.VersionTLS12), capturedTLSConfig.MinVersion)
-	assert.Equal(t, 1, sentMessages)
-}
-
-func TestGmailSender_SendHTMLError(t *testing.T) {
-	withFakeDialer(t, func(host string, port int, username, password string, tlsConfig *tls.Config) smtpDialer {
-		return &fakeSMTPDialer{
-			sendFunc: func(messages ...*gomail.Message) error {
-				return fmt.Errorf("auth failed")
-			},
+		if errors.Is(err, ErrAmbiguousDelivery) {
+			t.Errorf("%s: failed before DATA but was reported as ambiguous", step)
 		}
-	})
-
-	sender := NewGmailSender(config.SMTPConfig{Host: "smtp.gmail.com", Port: 587})
-
-	err := sender.SendHTML(context.Background(), "admin@test.com", "Subject", "<h1>Body</h1>")
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "auth failed")
+	}
 }
 
-func TestGmailSender_SendHTMLContextCanceled(t *testing.T) {
-	dialerCreated := false
-	withFakeDialer(t, func(host string, port int, username, password string, tlsConfig *tls.Config) smtpDialer {
-		dialerCreated = true
-		return &fakeSMTPDialer{}
-	})
+// Losing the connection while the body is in flight is exactly the case
+// delivery_unknown exists for: it may or may not have been accepted.
+func TestSend_FailureAfterDataIsAmbiguous(t *testing.T) {
+	for _, step := range []string{"write", "close"} {
+		s, _ := newTestSender(step, "")
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	sender := NewGmailSender(config.SMTPConfig{Host: "smtp.gmail.com", Port: 587})
+		id, err := s.Send(testMessage())
 
-	err := sender.SendHTML(ctx, "admin@test.com", "Subject", "<h1>Body</h1>")
-
-	assert.ErrorIs(t, err, context.Canceled)
-	assert.False(t, dialerCreated)
+		if !errors.Is(err, ErrAmbiguousDelivery) {
+			t.Errorf("%s: err = %v, want ErrAmbiguousDelivery", step, err)
+		}
+		// The ID still comes back: it is how an operator checks the Sent folder.
+		if id == "" {
+			t.Errorf("%s: expected the Message-ID to be returned anyway", step)
+		}
+	}
 }
 
-func TestCreateSMTPDialerDefault(t *testing.T) {
-	original := newSMTPDialerOverride
-	newSMTPDialerOverride = nil
-	t.Cleanup(func() {
-		newSMTPDialerOverride = original
-	})
+// The server accepted the message before QUIT, so a failed QUIT does not
+// un-send it.
+func TestSend_FailedQuitStillCountsAsSent(t *testing.T) {
+	s, _ := newTestSender("quit", "")
 
-	dialer := createSMTPDialer("smtp.gmail.com", 587, "user", "pass", &tls.Config{ServerName: "smtp.gmail.com"})
+	if _, err := s.Send(testMessage()); err != nil {
+		t.Fatalf("a failed QUIT must not fail the send: %v", err)
+	}
+}
 
-	assert.NotNil(t, dialer)
+func TestSend_DialFailureIsUnambiguous(t *testing.T) {
+	s := NewGmailSender("smtp.gmail.com", 587, "u", "p", "u@gmail.com", "")
+	s.dial = func(string) (smtpClient, error) { return nil, errNetwork }
+
+	_, err := s.Send(testMessage())
+
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if errors.Is(err, ErrAmbiguousDelivery) {
+		t.Error("a dial failure means nothing was sent; it is not ambiguous")
+	}
+}
+
+// The domain allowlist is what stops the service being used as a mail relay.
+func TestSend_RejectsDisallowedRecipient(t *testing.T) {
+	s, client := newTestSender("", "vcs.com.vn,example.org")
+
+	_, err := s.Send(testMessage()) // ops@example.com
+
+	if !errors.Is(err, ErrRecipientNotAllowed) {
+		t.Fatalf("err = %v, want ErrRecipientNotAllowed", err)
+	}
+	if len(client.steps) != 0 {
+		t.Error("connected to SMTP despite a disallowed recipient")
+	}
+}
+
+func TestAllowRecipient(t *testing.T) {
+	s := NewGmailSender("h", 587, "u", "p", "f@g.com", "vcs.com.vn, Example.ORG ")
+
+	cases := map[string]bool{
+		"ops@vcs.com.vn":  true,
+		"ops@example.org": true,
+		"ops@EXAMPLE.org": true,
+		"ops@evil.com":    false,
+		"no-at-sign":      false,
+		"":                false,
+	}
+	for addr, want := range cases {
+		if got := s.AllowRecipient(addr); got != want {
+			t.Errorf("AllowRecipient(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}
+
+// An empty allowlist is the local/dev default and permits anything.
+func TestAllowRecipient_EmptyAllowlistPermitsAll(t *testing.T) {
+	s := NewGmailSender("h", 587, "u", "p", "f@g.com", "")
+
+	if !s.AllowRecipient("anyone@anywhere.com") {
+		t.Error("an empty allowlist should permit any recipient")
+	}
+}
+
+// A Vietnamese subject must not go out as raw 8-bit bytes.
+func TestCompose_EncodesNonASCIISubject(t *testing.T) {
+	s, client := newTestSender("", "")
+
+	if _, err := s.Send(testMessage()); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	body := client.body.String()
+	if strings.Contains(body, "Subject: Báo cáo") {
+		t.Error("the non-ASCII subject was not MIME-encoded")
+	}
+	if !strings.Contains(body, "Subject: =?UTF-8?") {
+		t.Errorf("expected an encoded-word subject, got: %q", firstLine(body, "Subject:"))
+	}
+}
+
+func TestCompose_ASCIISubjectStaysPlain(t *testing.T) {
+	s, client := newTestSender("", "")
+	msg := testMessage()
+	msg.Subject = "Daily report"
+
+	if _, err := s.Send(msg); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if !strings.Contains(client.body.String(), "Subject: Daily report\r\n") {
+		t.Error("an ASCII subject should not be encoded")
+	}
+}
+
+func TestNewMessageID_IsUnique(t *testing.T) {
+	s := NewGmailSender("h", 587, "u", "p", "reports@vcs.com.vn", "")
+
+	first, second := s.newMessageID(), s.newMessageID()
+
+	if first == second {
+		t.Error("Message-IDs must be unique")
+	}
+	if !strings.HasSuffix(first, "@vcs.com.vn>") {
+		t.Errorf("Message-ID = %q, want it scoped to the From domain", first)
+	}
+}
+
+func firstLine(body, prefix string) string {
+	for line := range strings.SplitSeq(body, "\r\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
+}
+
+// SMTP_FROM may carry a display name, but MAIL FROM only accepts a bare
+// address and the Message-ID domain must not inherit the trailing bracket.
+func TestSend_HandlesFromWithDisplayName(t *testing.T) {
+	client := &fakeClient{}
+	s := NewGmailSender("smtp.gmail.com", 587, "u@gmail.com", "pw",
+		"VCS-SMS <reports@vcs.com.vn>", "")
+	s.dial = func(string) (smtpClient, error) { return client, nil }
+
+	id, err := s.Send(testMessage())
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if s.fromAddr != "reports@vcs.com.vn" {
+		t.Errorf("MAIL FROM would use %q, want the bare address", s.fromAddr)
+	}
+	if !strings.HasSuffix(id, "@vcs.com.vn>") {
+		t.Errorf("Message-ID = %q, want it to end @vcs.com.vn>", id)
+	}
+	// The header keeps the display name; only the envelope is stripped.
+	if !strings.Contains(client.body.String(), "From: VCS-SMS <reports@vcs.com.vn>") {
+		t.Error("the From header should keep the display name")
+	}
+}
+
+func TestBareAddress(t *testing.T) {
+	cases := map[string]string{
+		"VCS-SMS <a@b.com>": "a@b.com",
+		"<a@b.com>":         "a@b.com",
+		"a@b.com":           "a@b.com",
+		"  a@b.com  ":       "a@b.com",
+	}
+	for in, want := range cases {
+		if got := bareAddress(in); got != want {
+			t.Errorf("bareAddress(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

@@ -8,74 +8,91 @@ import (
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/vcs-sms/monitor-service/internal/checker"
+	"github.com/vcs-sms/monitor-service/internal/monitor"
 )
 
-// ESStatusLogRepo defines the interface for storing health-check results in Elasticsearch.
-type ESStatusLogRepo interface {
-	BulkIndex(ctx context.Context, results []*checker.HealthResult) error
+// Doc is one health fact as stored in Elasticsearch.
+type Doc struct {
+	ServerID   string `json:"server_id"`
+	ServerName string `json:"server_name"`
+	Status     string `json:"status"`
+	CheckedAt  string `json:"checked_at"`
+	RoundID    int64  `json:"round_id"`
+	LatencyMs  int    `json:"latency_ms"`
+	ErrorCode  string `json:"error_code,omitempty"`
 }
 
-type esStatusLogRepo struct {
-	client *elasticsearch.Client
-	index  string
+// FactWriter writes a batch of health facts.
+type FactWriter interface {
+	Write(ctx context.Context, facts []monitor.Fact) error
 }
 
-// NewESStatusLogRepo creates a new Elasticsearch status log repository.
-func NewESStatusLogRepo(client *elasticsearch.Client, index string) ESStatusLogRepo {
-	return &esStatusLogRepo{client: client, index: index}
+type esFactWriter struct {
+	client      *elasticsearch.Client
+	indexPrefix string
 }
 
-// BulkIndex writes multiple health-check results to Elasticsearch using the Bulk API.
-func (r *esStatusLogRepo) BulkIndex(ctx context.Context, results []*checker.HealthResult) error {
-	if len(results) == 0 {
+// NewFactWriter creates an Elasticsearch-backed FactWriter.
+func NewFactWriter(client *elasticsearch.Client, indexPrefix string) FactWriter {
+	return &esFactWriter{client: client, indexPrefix: indexPrefix}
+}
+
+// IndexName returns the daily index a fact belongs to.
+func IndexName(prefix string, checkedAt time.Time) string {
+	return fmt.Sprintf("%s-%s", prefix, checkedAt.UTC().Format("2006.01.02"))
+}
+
+// DocID is deterministic so a retried bulk cannot double-count a check.
+func DocID(serverID string, roundID int64) string {
+	return fmt.Sprintf("%s:%d", serverID, roundID)
+}
+
+// Write bulk-indexes the facts. Documents carry a deterministic _id, so the
+// whole call is safe to retry.
+func (w *esFactWriter) Write(ctx context.Context, facts []monitor.Fact) error {
+	if len(facts) == 0 {
 		return nil
 	}
 
 	var buf bytes.Buffer
-
-	for _, result := range results {
-		// Action metadata line
-		meta := map[string]interface{}{
-			"index": map[string]interface{}{
-				"_index": r.index,
+	for _, f := range facts {
+		meta := map[string]any{
+			"index": map[string]any{
+				"_index": IndexName(w.indexPrefix, f.CheckedAt),
+				"_id":    DocID(f.ServerID, f.RoundID),
 			},
 		}
-		metaJSON, _ := json.Marshal(meta)
+		metaJSON, err := json.Marshal(meta)
+		if err != nil {
+			return fmt.Errorf("failed to encode bulk metadata: %w", err)
+		}
 		buf.Write(metaJSON)
 		buf.WriteByte('\n')
 
-		// Document line
-		doc := map[string]interface{}{
-			"server_id":        result.ServerID,
-			"server_name":      result.ServerName,
-			"status":           result.Status,
-			"checked_at":       result.CheckedAt.Format(time.RFC3339),
-			"response_time_ms": result.ResponseTimeMs,
-			"check_method":     result.CheckMethod,
+		docJSON, err := json.Marshal(Doc{
+			ServerID:   f.ServerID,
+			ServerName: f.ServerName,
+			Status:     f.Status,
+			CheckedAt:  f.CheckedAt.UTC().Format(time.RFC3339),
+			RoundID:    f.RoundID,
+			LatencyMs:  f.LatencyMs,
+			ErrorCode:  f.ErrorCode,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to encode health fact: %w", err)
 		}
-		if result.Error != "" {
-			doc["error"] = result.Error
-		}
-		docJSON, _ := json.Marshal(doc)
 		buf.Write(docJSON)
 		buf.WriteByte('\n')
 	}
 
-	// Execute bulk request
-	res, err := r.client.Bulk(
-		bytes.NewReader(buf.Bytes()),
-		r.client.Bulk.WithContext(ctx),
-		r.client.Bulk.WithIndex(r.index),
-	)
+	res, err := w.client.Bulk(bytes.NewReader(buf.Bytes()), w.client.Bulk.WithContext(ctx))
 	if err != nil {
-		return fmt.Errorf("bulk index request failed: %w", err)
+		return fmt.Errorf("bulk request failed: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
-		return fmt.Errorf("bulk index returned error: %s", res.String())
+		return fmt.Errorf("bulk returned %s", res.Status())
 	}
-
 	return nil
 }

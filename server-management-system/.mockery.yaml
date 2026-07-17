@@ -1,6 +1,9 @@
 # ── .mockery.yaml ──
 # Mockery config for VCS-SMS
-# Usage: mockery
+# Usage: make mocks
+#
+# Most tests use hand-written fakes rather than generated mocks; only add a
+# package here when a generated mock is actually imported.
 
 with-expecter: true
 packages:
@@ -18,27 +21,4 @@ packages:
       outpkg: "mocks"
     interfaces:
       ServerRepository:
-  github.com/vcs-sms/monitor-service/internal/repository:
-    config:
-      dir: "{{.InterfaceDir}}/mocks"
-      filename: "{{.InterfaceName}}_mock.go"
-      outpkg: "mocks"
-    interfaces:
-      HealthCheckConfigRepo:
-      ServerReader:
-      ESStatusLogRepo:
-  github.com/vcs-sms/monitor-service/internal/checker:
-    config:
-      dir: "{{.InterfaceDir}}/mocks"
-      filename: "{{.InterfaceName}}_mock.go"
-      outpkg: "mocks"
-    interfaces:
-      HealthChecker:
-  github.com/vcs-sms/shared/kafka:
-    config:
-      dir: "{{.InterfaceDir}}/mocks"
-      filename: "{{.InterfaceName}}_mock.go"
-      outpkg: "mocks"
-    interfaces:
-      Producer:
-      Consumer:
+      IdempotencyRepository:

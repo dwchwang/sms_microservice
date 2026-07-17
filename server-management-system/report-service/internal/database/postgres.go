@@ -32,6 +32,6 @@ func Connect(cfg config.DatabaseConfig) *gorm.DB {
 	sqlDB.SetMaxOpenConns(25)
 	sqlDB.SetMaxIdleConns(10)
 
-	fmt.Println("[DB] Connected to PostgreSQL (report_schema) successfully")
+	fmt.Println("[DB] Connected to report_db successfully")
 	return db
 }

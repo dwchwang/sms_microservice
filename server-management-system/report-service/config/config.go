@@ -2,18 +2,22 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/spf13/viper"
 )
 
+// ReportTimezone is the zone report dates are interpreted in.
+const ReportTimezone = "Asia/Ho_Chi_Minh"
+
 // Config holds all configuration for the report service.
 type Config struct {
 	App      AppConfig
-	ReportDB DatabaseConfig
-	Redis    RedisConfig
+	Database DatabaseConfig
 	ES       ESConfig
 	SMTP     SMTPConfig
-	Kafka    KafkaConfig
+	Server   ServerClientConfig
+	Report   ReportConfig
 	Log      LogConfig
 }
 
@@ -27,59 +31,60 @@ type AppConfig struct {
 // DatabaseConfig holds PostgreSQL connection configuration.
 type DatabaseConfig struct {
 	Host     string
-	Port     string
+	Port     int
+	Name     string
 	User     string
 	Password string
-	DBName   string
-	Schema   string
 	SSLMode  string
 }
 
 // DSN returns the PostgreSQL connection string.
 func (c DatabaseConfig) DSN() string {
 	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s search_path=%s",
-		c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode, c.Schema,
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		c.Host, c.Port, c.User, c.Password, c.Name, c.SSLMode,
 	)
-}
-
-// RedisConfig holds Redis connection configuration.
-type RedisConfig struct {
-	Host     string
-	Port     string
-	Password string
-	DB       int
-}
-
-// Addr returns the Redis address string.
-func (c RedisConfig) Addr() string {
-	return fmt.Sprintf("%s:%s", c.Host, c.Port)
 }
 
 // ESConfig holds Elasticsearch connection configuration.
 type ESConfig struct {
-	Addresses string
-	Username  string
-	Password  string
-	IndexName string
+	Addresses   string
+	Username    string
+	Password    string
+	IndexPrefix string
 }
 
-// SMTPConfig holds SMTP email configuration.
+// SMTPConfig holds Gmail SMTP configuration.
 type SMTPConfig struct {
-	Host       string
-	Port       int
-	Username   string
-	Password   string
-	From       string
-	AdminEmail string
+	Host     string
+	Port     int
+	Username string
+	Password string
+	From     string
+	// RecipientDomains limits who reports may be mailed to, so the service
+	// cannot be turned into an open relay. Empty allows any domain.
+	RecipientDomains string
 }
 
-// KafkaConfig holds Kafka connection configuration.
-type KafkaConfig struct {
-	Brokers string
+// ServerClientConfig points at the Server Service internal API.
+type ServerClientConfig struct {
+	BaseURL string
+	Timeout time.Duration
 }
 
-// LogConfig holds logger configuration.
+// ReportConfig holds report rules.
+type ReportConfig struct {
+	// MaxRangeDays caps how wide a report may be.
+	MaxRangeDays int
+	// CoverageThresholdPct marks a report degraded below this coverage.
+	CoverageThresholdPct float64
+	// DailyRecipient receives the scheduled daily report.
+	DailyRecipient string
+	SnapshotCron   string
+	DailyCron      string
+}
+
+// LogConfig holds logging configuration.
 type LogConfig struct {
 	Level      string
 	Dir        string
@@ -89,66 +94,91 @@ type LogConfig struct {
 	Compress   bool
 }
 
-// LoadConfig reads configuration from environment variables via Viper.
+// LoadConfig reads configuration from .env file and environment variables.
 func LoadConfig() *Config {
-	viper.SetConfigFile(".env")
-	viper.SetConfigType("env")
-
 	viper.AutomaticEnv()
+	viper.SetConfigFile("../.env")
 	_ = viper.ReadInConfig()
 
-	viper.SetDefault("REPORT_PORT", "8084")
-	viper.SetDefault("REPORT_DB_SSLMODE", "disable")
-	viper.SetDefault("REDIS_DB", "2")
-	viper.SetDefault("ES_INDEX_NAME", "server-status-logs")
-	viper.SetDefault("SMTP_HOST", "smtp.gmail.com")
-	viper.SetDefault("SMTP_PORT", "587")
-	viper.SetDefault("SMTP_FROM", "VCS-SMS <noreply@vcs-sms.com>")
-	viper.SetDefault("SMTP_ADMIN_EMAIL", "admin@company.com")
-	viper.SetDefault("LOG_LEVEL", "info")
-	viper.SetDefault("LOG_DIR", "/var/log/vcs-sms/report")
-	viper.SetDefault("LOG_MAX_SIZE", "100")
-	viper.SetDefault("LOG_MAX_BACKUPS", "5")
-	viper.SetDefault("LOG_MAX_AGE", "30")
-	viper.SetDefault("LOG_COMPRESS", "true")
+	viper.SetDefault("APP_NAME", "report-service")
+	viper.SetDefault("APP_PORT", "8084")
+	viper.SetDefault("APP_ENV", "development")
 
-	cfg := &Config{
+	viper.SetDefault("REPORT_DB_HOST", "localhost")
+	viper.SetDefault("REPORT_DB_PORT", 5432)
+	viper.SetDefault("REPORT_DB_USER", "report_user_v2")
+	viper.SetDefault("REPORT_DB_PASSWORD", "report_pass_secret_v2")
+	viper.SetDefault("REPORT_DB_NAME", "report_db")
+	viper.SetDefault("REPORT_DB_SSLMODE", "disable")
+
+	viper.SetDefault("ES_ADDRESSES", "http://localhost:9200")
+	viper.SetDefault("ES_USERNAME", "")
+	viper.SetDefault("ES_PASSWORD", "")
+	viper.SetDefault("ES_INDEX_PREFIX", "server-status-logs")
+
+	viper.SetDefault("SMTP_HOST", "smtp.gmail.com")
+	viper.SetDefault("SMTP_PORT", 587)
+	viper.SetDefault("SMTP_USERNAME", "")
+	viper.SetDefault("SMTP_PASSWORD", "")
+	viper.SetDefault("SMTP_FROM", "")
+	viper.SetDefault("SMTP_RECIPIENT_DOMAINS", "")
+
+	viper.SetDefault("SERVER_INTERNAL_URL", "http://server-service:8082")
+	viper.SetDefault("SERVER_INTERNAL_TIMEOUT", 30)
+
+	viper.SetDefault("REPORT_MAX_RANGE_DAYS", 31)
+	viper.SetDefault("REPORT_COVERAGE_THRESHOLD", 95.0)
+	viper.SetDefault("REPORT_DAILY_RECIPIENT", "")
+	// Snapshot runs at 00:30 for the day before; the daily report at 10:00
+	// reads what the snapshot produced.
+	viper.SetDefault("REPORT_SNAPSHOT_CRON", "30 0 * * *")
+	viper.SetDefault("REPORT_DAILY_CRON", "0 10 * * *")
+
+	viper.SetDefault("LOG_LEVEL", "debug")
+	viper.SetDefault("LOG_DIR", "logs/report")
+	viper.SetDefault("LOG_MAX_SIZE", 100)
+	viper.SetDefault("LOG_MAX_BACKUPS", 10)
+	viper.SetDefault("LOG_MAX_AGE", 30)
+	viper.SetDefault("LOG_COMPRESS", true)
+
+	return &Config{
 		App: AppConfig{
-			Name: "report-service",
-			Port: viper.GetString("REPORT_PORT"),
+			Name: viper.GetString("APP_NAME"),
+			Port: viper.GetString("APP_PORT"),
 			Env:  viper.GetString("APP_ENV"),
 		},
-		ReportDB: DatabaseConfig{
+		Database: DatabaseConfig{
 			Host:     viper.GetString("REPORT_DB_HOST"),
-			Port:     viper.GetString("REPORT_DB_PORT"),
+			Port:     viper.GetInt("REPORT_DB_PORT"),
 			User:     viper.GetString("REPORT_DB_USER"),
 			Password: viper.GetString("REPORT_DB_PASSWORD"),
-			DBName:   viper.GetString("REPORT_DB_NAME"),
-			Schema:   viper.GetString("REPORT_DB_SCHEMA"),
+			Name:     viper.GetString("REPORT_DB_NAME"),
 			SSLMode:  viper.GetString("REPORT_DB_SSLMODE"),
 		},
-		Redis: RedisConfig{
-			Host:     viper.GetString("REDIS_HOST"),
-			Port:     viper.GetString("REDIS_PORT"),
-			Password: viper.GetString("REDIS_PASSWORD"),
-			DB:       viper.GetInt("REDIS_DB"),
-		},
 		ES: ESConfig{
-			Addresses: viper.GetString("ES_HOST"),
-			Username:  viper.GetString("ES_USERNAME"),
-			Password:  viper.GetString("ES_PASSWORD"),
-			IndexName: viper.GetString("ES_INDEX_NAME"),
+			Addresses:   viper.GetString("ES_ADDRESSES"),
+			Username:    viper.GetString("ES_USERNAME"),
+			Password:    viper.GetString("ES_PASSWORD"),
+			IndexPrefix: viper.GetString("ES_INDEX_PREFIX"),
 		},
 		SMTP: SMTPConfig{
-			Host:       viper.GetString("SMTP_HOST"),
-			Port:       viper.GetInt("SMTP_PORT"),
-			Username:   viper.GetString("SMTP_USERNAME"),
-			Password:   viper.GetString("SMTP_PASSWORD"),
-			From:       viper.GetString("SMTP_FROM"),
-			AdminEmail: viper.GetString("SMTP_ADMIN_EMAIL"),
+			Host:             viper.GetString("SMTP_HOST"),
+			Port:             viper.GetInt("SMTP_PORT"),
+			Username:         viper.GetString("SMTP_USERNAME"),
+			Password:         viper.GetString("SMTP_PASSWORD"),
+			From:             viper.GetString("SMTP_FROM"),
+			RecipientDomains: viper.GetString("SMTP_RECIPIENT_DOMAINS"),
 		},
-		Kafka: KafkaConfig{
-			Brokers: viper.GetString("KAFKA_BROKERS"),
+		Server: ServerClientConfig{
+			BaseURL: viper.GetString("SERVER_INTERNAL_URL"),
+			Timeout: time.Duration(viper.GetInt("SERVER_INTERNAL_TIMEOUT")) * time.Second,
+		},
+		Report: ReportConfig{
+			MaxRangeDays:         viper.GetInt("REPORT_MAX_RANGE_DAYS"),
+			CoverageThresholdPct: viper.GetFloat64("REPORT_COVERAGE_THRESHOLD"),
+			DailyRecipient:       viper.GetString("REPORT_DAILY_RECIPIENT"),
+			SnapshotCron:         viper.GetString("REPORT_SNAPSHOT_CRON"),
+			DailyCron:            viper.GetString("REPORT_DAILY_CRON"),
 		},
 		Log: LogConfig{
 			Level:      viper.GetString("LOG_LEVEL"),
@@ -159,6 +189,4 @@ func LoadConfig() *Config {
 			Compress:   viper.GetBool("LOG_COMPRESS"),
 		},
 	}
-
-	return cfg
 }

@@ -2,830 +2,278 @@ package service
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog"
-	"github.com/stretchr/testify/assert"
-	"github.com/vcs-sms/report-service/config"
-	"github.com/vcs-sms/report-service/internal/dto"
-	emailMocks "github.com/vcs-sms/report-service/internal/email/mocks"
-	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/repository"
-	repoMocks "github.com/vcs-sms/report-service/internal/repository/mocks"
 )
 
-type fakeSummaryCache struct {
-	summary *dto.ReportSummaryResponse
-	getErr  error
-	gets    int
-	sets    int
-	setFunc func(ctx context.Context, startDate, endDate time.Time, summary *dto.ReportSummaryResponse) error
+var (
+	loc, _  = time.LoadLocation("Asia/Ho_Chi_Minh")
+	errBoom = errors.New("boom")
+)
+
+type fakeSnapshots struct {
+	repository.SnapshotRepository
+	missing    []time.Time
+	totals     *repository.Totals
+	lastStatus map[string]int64
+	top        []repository.LowUptimeServer
+	gotStart   time.Time
+	gotEnd     time.Time
+	gotLastDay time.Time
+	missingErr error
+	totalsErr  error
+	statusErr  error
+	topErr     error
 }
 
-func (f *fakeSummaryCache) Get(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-	f.gets++
-	if f.getErr != nil {
-		return nil, f.getErr
+func (f *fakeSnapshots) MissingDates(ctx context.Context, start, end time.Time) ([]time.Time, error) {
+	f.gotStart, f.gotEnd = start, end
+	return f.missing, f.missingErr
+}
+
+func (f *fakeSnapshots) Totals(ctx context.Context, start, end time.Time) (*repository.Totals, error) {
+	if f.totalsErr != nil {
+		return nil, f.totalsErr
 	}
-	return f.summary, nil
-}
-
-func (f *fakeSummaryCache) Set(ctx context.Context, startDate, endDate time.Time, summary *dto.ReportSummaryResponse) error {
-	f.sets++
-	if f.setFunc != nil {
-		return f.setFunc(ctx, startDate, endDate, summary)
+	if f.totals == nil {
+		return &repository.Totals{}, nil
 	}
-	return nil
+	return f.totals, nil
 }
 
-func createTestService(
-	esMock *repoMocks.UptimeCalculatorMock,
-	serverCounter repository.ServerCounter,
-	jobMock *repoMocks.ReportJobRepoMock,
-	snapMock *repoMocks.DailySnapshotRepoMock,
-	emailMock *emailMocks.EmailSenderMock,
-) ReportService {
-	logger := zerolog.Nop()
-	return NewReportService(
-		esMock,
-		serverCounter,
-		jobMock,
-		snapMock,
-		emailMock,
-		nil, // redis nil
-		config.SMTPConfig{AdminEmail: "admin@test.com"},
-		logger,
-	)
+func (f *fakeSnapshots) CountByLastStatus(ctx context.Context, date time.Time) (map[string]int64, error) {
+	f.gotLastDay = date
+	return f.lastStatus, f.statusErr
 }
 
-func TestNewReportService_WithRedisClientInitializesCache(t *testing.T) {
-	svc := NewReportService(
-		nil,
-		nil,
-		nil,
-		nil,
-		nil,
-		redis.NewClient(&redis.Options{Addr: "localhost:6379"}),
-		config.SMTPConfig{AdminEmail: "admin@test.com"},
-		zerolog.Nop(),
-	)
-
-	reportSvc, ok := svc.(*reportService)
-	assert.True(t, ok)
-	assert.NotNil(t, reportSvc.cache)
+func (f *fakeSnapshots) LowestUptime(ctx context.Context, start, end time.Time, limit int) ([]repository.LowUptimeServer, error) {
+	return f.top, f.topErr
 }
 
-func TestGetSummary_Success(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{
-				TotalServers: 100,
-				ServersOn:    95,
-				ServersOff:   5,
-				AvgUptimePct: 95.5,
-				TotalChecks:  10000,
-			}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return []dto.ServerUptime{
-				{ServerID: "srv-1", ServerName: "test-1", UptimePct: 50.0, TotalChecks: 100, OnChecks: 50},
-			}, nil
-		},
+func newTestService(snaps *fakeSnapshots) ReportService {
+	svc := NewReportService(snaps, loc, 31, 95.0).(*reportService)
+	svc.now = func() time.Time { return now }
+	return svc
+}
+
+func ptr(v float64) *float64 { return &v }
+
+// now is fixed so "a day that has finished" is deterministic.
+var now = time.Date(2026, 7, 17, 9, 0, 0, 0, loc)
+
+func TestParseRange_Accepts(t *testing.T) {
+	svc := newTestService(&fakeSnapshots{})
+
+	start, end, err := svc.ParseRange("2026-07-15", "2026-07-16", now)
+	if err != nil {
+		t.Fatalf("ParseRange failed: %v", err)
 	}
-
-	svc := createTestService(esMock, nil, nil, nil, nil)
-
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
-
-	summary, err := svc.GetSummary(context.Background(), start, end)
-
-	assert.NoError(t, err)
-	assert.Equal(t, 100, summary.TotalServers)
-	assert.Equal(t, 95, summary.ServersOn)
-	assert.Equal(t, 5, summary.ServersOff)
-	assert.Equal(t, 95.5, summary.AvgUptimePct)
-	assert.Len(t, summary.LowUptimeServers, 1)
+	if start.Format(time.DateOnly) != "2026-07-15" || end.Format(time.DateOnly) != "2026-07-16" {
+		t.Errorf("range = %v..%v", start, end)
+	}
 }
 
-func TestGetSummary_ESError(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return nil, fmt.Errorf("ES connection failed")
-		},
+func TestParseRange_Rejects(t *testing.T) {
+	svc := newTestService(&fakeSnapshots{})
+
+	cases := map[string][2]string{
+		"start not a date":  {"yesterday", "2026-07-16"},
+		"end not a date":    {"2026-07-15", "tomorrow"},
+		"wrong format":      {"15/07/2026", "16/07/2026"},
+		"start after end":   {"2026-07-16", "2026-07-15"},
+		"end is today":      {"2026-07-16", "2026-07-17"},
+		"end in the future": {"2026-07-18", "2026-07-19"},
+		"range too wide":    {"2026-05-01", "2026-07-16"},
 	}
 
-	svc := createTestService(esMock, nil, nil, nil, nil)
-
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
-
-	_, err := svc.GetSummary(context.Background(), start, end)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "ES connection failed")
+	for name, c := range cases {
+		if _, _, err := svc.ParseRange(c[0], c[1], now); !errors.Is(err, ErrInvalidRange) {
+			t.Errorf("%s: err = %v, want ErrInvalidRange", name, err)
+		}
+	}
 }
 
-func TestGetSummary_LowUptimeErrorIsTolerated(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{
-				TotalServers: 50,
-				ServersOn:    48,
-				ServersOff:   2,
-				AvgUptimePct: 96.0,
-				TotalChecks:  5000,
-			}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return nil, fmt.Errorf("low uptime query failed")
-		},
+// A day that has not ended has no snapshot, so uptime for it is meaningless.
+func TestParseRange_RejectsToday(t *testing.T) {
+	svc := newTestService(&fakeSnapshots{})
+
+	_, _, err := svc.ParseRange("2026-07-17", "2026-07-17", now)
+
+	if !errors.Is(err, ErrInvalidRange) {
+		t.Fatalf("err = %v, want ErrInvalidRange for today", err)
 	}
-
-	svc := createTestService(esMock, nil, nil, nil, nil)
-
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
-
-	summary, err := svc.GetSummary(context.Background(), start, end)
-
-	// Should succeed even if low uptime query fails
-	assert.NoError(t, err)
-	assert.Equal(t, 50, summary.TotalServers)
-	assert.Empty(t, summary.LowUptimeServers)
 }
 
-func TestGetSummary_UsesPostgresTotalServerCount(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{
-				TotalServers: 2,
-				ServersOn:    1,
-				ServersOff:   1,
-				AvgUptimePct: 50.0,
-				TotalChecks:  20,
-			}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return nil, nil
-		},
+func TestParseRange_AcceptsExactlyMaxDays(t *testing.T) {
+	svc := newTestService(&fakeSnapshots{})
+
+	// 2026-06-16..2026-07-16 inclusive is 31 days.
+	if _, _, err := svc.ParseRange("2026-06-16", "2026-07-16", now); err != nil {
+		t.Fatalf("31 days should be accepted: %v", err)
 	}
-	serverCounter := &repoMocks.ServerCounterMock{
-		CountActiveServersFunc: func(ctx context.Context) (int, error) {
-			return 10, nil
-		},
-	}
-
-	svc := createTestService(esMock, serverCounter, nil, nil, nil)
-
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
-	summary, err := svc.GetSummary(context.Background(), start, end)
-
-	assert.NoError(t, err)
-	assert.Equal(t, 10, summary.TotalServers)
-	assert.Equal(t, 1, summary.ServersOn)
-	assert.Equal(t, 9, summary.ServersOff)
 }
 
-func TestGetSummary_CacheHitDoesNotQueryES(t *testing.T) {
-	esCalled := false
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			esCalled = true
-			return nil, fmt.Errorf("should not query ES on cache hit")
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			esCalled = true
-			return nil, fmt.Errorf("should not query ES on cache hit")
-		},
-	}
-
-	svc := &reportService{
-		esUptimeRepo: esMock,
-		cache: &fakeSummaryCache{summary: &dto.ReportSummaryResponse{
-			StartDate:    "2026-06-01",
-			EndDate:      "2026-06-01",
-			TotalServers: 10,
-			ServersOn:    9,
-			ServersOff:   1,
-			AvgUptimePct: 90,
-			LowUptimeServers: []dto.ServerUptime{
-				{ServerID: "SRV-1", UptimePct: 10},
-			},
-		}},
-		logger: zerolog.Nop(),
-	}
-
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
-	summary, err := svc.GetSummary(context.Background(), start, end)
-
-	assert.NoError(t, err)
-	assert.False(t, esCalled)
-	assert.Equal(t, 10, summary.TotalServers)
-	assert.Len(t, summary.LowUptimeServers, 1)
-}
-
-func TestShouldUseSummaryCache_BypassesRangesIncludingToday(t *testing.T) {
-	now := time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
-
-	historicalStart := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	historicalEnd := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
-	assert.True(t, shouldUseSummaryCache(historicalStart, historicalEnd, now))
-
-	currentStart := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
-	currentEnd := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
-	assert.False(t, shouldUseSummaryCache(currentStart, currentEnd, now))
-}
-
-func TestGetSummary_BypassesCacheForCurrentDayRange(t *testing.T) {
-	esCalled := false
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			esCalled = true
-			return &dto.ReportSummaryResponse{
-				TotalServers: 100,
-				ServersOn:    80,
-				ServersOff:   20,
-				AvgUptimePct: 80,
-			}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return nil, nil
-		},
-	}
-	cache := &fakeSummaryCache{summary: &dto.ReportSummaryResponse{
-		TotalServers: 10,
-		ServersOn:    9,
-		ServersOff:   1,
-		AvgUptimePct: 90,
+// A missing snapshot must fail loudly rather than average over a hole.
+func TestSummary_MissingSnapshotIsRefused(t *testing.T) {
+	snaps := &fakeSnapshots{missing: []time.Time{
+		time.Date(2026, 7, 15, 0, 0, 0, 0, loc),
 	}}
-	svc := &reportService{
-		esUptimeRepo: esMock,
-		cache:        cache,
-		logger:       zerolog.Nop(),
-		clock: func() time.Time {
-			return time.Date(2026, 6, 12, 12, 0, 0, 0, time.UTC)
-		},
+	svc := newTestService(snaps)
+
+	_, err := svc.Summary(context.Background(), "2026-07-15", "2026-07-16")
+
+	if !errors.Is(err, ErrDataUnavailable) {
+		t.Fatalf("err = %v, want ErrDataUnavailable", err)
 	}
-
-	start := time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 13, 0, 0, 0, 0, time.UTC)
-	summary, err := svc.GetSummary(context.Background(), start, end)
-
-	assert.NoError(t, err)
-	assert.True(t, esCalled)
-	assert.Equal(t, 0, cache.gets)
-	assert.Equal(t, 0, cache.sets)
-	assert.Equal(t, 100, summary.TotalServers)
+	var dataErr *DataUnavailableError
+	if !errors.As(err, &dataErr) {
+		t.Fatal("expected the error to name the missing dates")
+	}
+	if len(dataErr.MissingDates) != 1 || dataErr.MissingDates[0] != "2026-07-15" {
+		t.Errorf("MissingDates = %v", dataErr.MissingDates)
+	}
 }
 
-func TestGetSummary_CacheMissStoresCompleteSummary(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{
-				StartDate:    "2026-06-01",
-				EndDate:      "2026-06-10",
-				TotalServers: 2,
-				ServersOn:    1,
-				ServersOff:   1,
-				AvgUptimePct: 50,
-			}, nil
+func TestSummary_ComputesDistributionAndCoverage(t *testing.T) {
+	snaps := &fakeSnapshots{
+		totals: &repository.Totals{
+			TotalServers:      10,
+			AvgUptimePct:      ptr(99.2),
+			ServersUptime100:  6,
+			ServersUptime0:    1,
+			ServersNoData:     2,
+			SumActualChecks:   800,
+			SumExpectedChecks: 1000,
 		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return []dto.ServerUptime{{ServerID: "SRV-2", UptimePct: 10}}, nil
-		},
+		lastStatus: map[string]int64{"ON": 7, "OFF": 1},
+	}
+	svc := newTestService(snaps)
+
+	resp, err := svc.Summary(context.Background(), "2026-07-16", "2026-07-16")
+	if err != nil {
+		t.Fatalf("Summary failed: %v", err)
 	}
 
-	var cachedSummary *dto.ReportSummaryResponse
-	svc := &reportService{
-		esUptimeRepo: esMock,
-		cache: &fakeSummaryCache{
-			getErr: fmt.Errorf("cache miss"),
-			setFunc: func(ctx context.Context, startDate, endDate time.Time, summary *dto.ReportSummaryResponse) error {
-				cachedSummary = summary
-				assert.Equal(t, "report:summary:2026-06-01:2026-06-10", reportSummaryCacheKey(startDate, endDate))
-				return nil
-			},
-		},
-		logger: zerolog.Nop(),
+	// Partial is the remainder, so the four buckets always sum to the total.
+	if resp.ServersUptimePartial != 1 {
+		t.Errorf("ServersUptimePartial = %d, want 1", resp.ServersUptimePartial)
 	}
-
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
-	summary, err := svc.GetSummary(context.Background(), start, end)
-
-	assert.NoError(t, err)
-	assert.Equal(t, summary, cachedSummary)
-	assert.Len(t, cachedSummary.LowUptimeServers, 1)
+	sum := resp.ServersUptime100 + resp.ServersUptimePartial + resp.ServersUptime0 + resp.ServersNoData
+	if sum != resp.TotalServers {
+		t.Errorf("buckets sum to %d, want total_servers %d", sum, resp.TotalServers)
+	}
+	if resp.CoveragePct != 80 {
+		t.Errorf("CoveragePct = %v, want 80", resp.CoveragePct)
+	}
+	if !resp.Degraded {
+		t.Error("80%% coverage is below the 95%% threshold and must be degraded")
+	}
+	if resp.ServersOnAtEndAt != 7 || resp.ServersOffAtEndAt != 1 {
+		t.Errorf("on/off at end = %d/%d, want 7/1", resp.ServersOnAtEndAt, resp.ServersOffAtEndAt)
+	}
 }
 
-func TestRedisSummaryCache_Get(t *testing.T) {
-	cache := &redisSummaryCache{
-		get: func(ctx context.Context, key string) (string, error) {
-			assert.Equal(t, "report:summary:2026-06-01:2026-06-10", key)
-			return `{"start_date":"2026-06-01","end_date":"2026-06-10","total_servers":10,"servers_on":9,"servers_off":1,"avg_uptime_pct":90,"low_uptime_servers":[{"server_id":"SRV-1","uptime_pct":10}]}`, nil
+func TestSummary_HealthyCoverageIsNotDegraded(t *testing.T) {
+	snaps := &fakeSnapshots{
+		totals: &repository.Totals{
+			TotalServers: 10, SumActualChecks: 998, SumExpectedChecks: 1000,
 		},
 	}
+	svc := newTestService(snaps)
 
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
-	summary, err := cache.Get(context.Background(), start, end)
-
-	assert.NoError(t, err)
-	assert.Equal(t, 10, summary.TotalServers)
-	assert.Len(t, summary.LowUptimeServers, 1)
+	resp, err := svc.Summary(context.Background(), "2026-07-16", "2026-07-16")
+	if err != nil {
+		t.Fatalf("Summary failed: %v", err)
+	}
+	if resp.Degraded {
+		t.Errorf("coverage %v should not be degraded", resp.CoveragePct)
+	}
 }
 
-func TestRedisSummaryCache_Set(t *testing.T) {
-	cache := &redisSummaryCache{
-		set: func(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
-			assert.Equal(t, "report:summary:2026-06-01:2026-06-10", key)
-			assert.Equal(t, time.Hour, ttl)
-			data, ok := value.([]byte)
-			assert.True(t, ok)
-			assert.Contains(t, string(data), `"low_uptime_servers":[{"server_id":"SRV-1"`)
-			return nil
-		},
+// The closing status is read from the last day of the window, not the first.
+func TestSummary_ClosingStatusUsesEndDate(t *testing.T) {
+	snaps := &fakeSnapshots{lastStatus: map[string]int64{"ON": 1}}
+	svc := newTestService(snaps)
+
+	if _, err := svc.Summary(context.Background(), "2026-07-14", "2026-07-16"); err != nil {
+		t.Fatalf("Summary failed: %v", err)
 	}
 
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
-	err := cache.Set(context.Background(), start, end, &dto.ReportSummaryResponse{
-		StartDate:    "2026-06-01",
-		EndDate:      "2026-06-10",
-		TotalServers: 10,
-		LowUptimeServers: []dto.ServerUptime{
-			{ServerID: "SRV-1", UptimePct: 10},
-		},
-	})
-
-	assert.NoError(t, err)
+	if got := snaps.gotLastDay.Format(time.DateOnly); got != "2026-07-16" {
+		t.Errorf("closing status read from %s, want the end date", got)
+	}
 }
 
-func TestSetCachedSummary_ToleratesCacheError(t *testing.T) {
-	svc := &reportService{
-		cache: &fakeSummaryCache{
-			setFunc: func(ctx context.Context, startDate, endDate time.Time, summary *dto.ReportSummaryResponse) error {
-				return fmt.Errorf("redis unavailable")
-			},
-		},
-		logger: zerolog.Nop(),
+// Everything having no data leaves the average unknown rather than 0.
+func TestSummary_AvgIsNullWhenNothingHasData(t *testing.T) {
+	snaps := &fakeSnapshots{
+		totals: &repository.Totals{TotalServers: 3, ServersNoData: 3, AvgUptimePct: nil},
 	}
+	svc := newTestService(snaps)
 
-	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 2, 0, 0, 0, 0, time.UTC)
-
-	assert.NotPanics(t, func() {
-		svc.setCachedSummary(context.Background(), start, end, &dto.ReportSummaryResponse{})
-	})
+	resp, err := svc.Summary(context.Background(), "2026-07-16", "2026-07-16")
+	if err != nil {
+		t.Fatalf("Summary failed: %v", err)
+	}
+	if resp.AvgUptimePct != nil {
+		t.Errorf("AvgUptimePct = %v, want nil", *resp.AvgUptimePct)
+	}
 }
 
-func TestMarkJobFailed_ToleratesUpdateError(t *testing.T) {
-	jobMock := &repoMocks.ReportJobRepoMock{
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			return fmt.Errorf("db unavailable")
-		},
-	}
-	svc := &reportService{
-		reportJobRepo: jobMock,
-		logger:        zerolog.Nop(),
-	}
-	job := &model.ReportJob{ID: "job-id", Status: "processing"}
+func TestSummary_ZeroExpectedChecksDoesNotDivideByZero(t *testing.T) {
+	svc := newTestService(&fakeSnapshots{totals: &repository.Totals{}})
 
-	assert.NotPanics(t, func() {
-		svc.markJobFailed(context.Background(), job, "failed")
-	})
-	assert.Equal(t, "failed", job.Status)
-	assert.NotNil(t, job.ErrorMessage)
+	resp, err := svc.Summary(context.Background(), "2026-07-16", "2026-07-16")
+	if err != nil {
+		t.Fatalf("Summary failed: %v", err)
+	}
+	if resp.CoveragePct != 0 {
+		t.Errorf("CoveragePct = %v, want 0", resp.CoveragePct)
+	}
 }
 
-func TestSendReport_Success(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{
-				TotalServers: 200,
-				ServersOn:    190,
-				ServersOff:   10,
-				AvgUptimePct: 95.0,
-				TotalChecks:  20000,
-			}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return []dto.ServerUptime{}, nil
-		},
+func TestSummary_EmptyTopIsAnArray(t *testing.T) {
+	svc := newTestService(&fakeSnapshots{})
+
+	resp, err := svc.Summary(context.Background(), "2026-07-16", "2026-07-16")
+	if err != nil {
+		t.Fatalf("Summary failed: %v", err)
 	}
-
-	var savedJob *model.ReportJob
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "test-job-id"
-			savedJob = job
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			savedJob = job
-			return nil
-		},
+	// Serialising nil would emit null instead of [].
+	if resp.Top10LowestUptime == nil {
+		t.Error("expected an empty array rather than nil")
 	}
-
-	emailSent := false
-	emailMock := &emailMocks.EmailSenderMock{
-		SendHTMLFunc: func(ctx context.Context, to, subject, htmlBody string) error {
-			emailSent = true
-			assert.Contains(t, subject, "Server Status Report")
-			return nil
-		},
-	}
-
-	svc := createTestService(esMock, nil, jobMock, nil, emailMock)
-
-	req := &dto.SendReportRequest{
-		StartDate: "2026-06-01",
-		EndDate:   "2026-06-10",
-		Email:     "user@test.com",
-	}
-
-	result, err := svc.SendReport(context.Background(), req)
-
-	assert.NoError(t, err)
-	assert.Equal(t, "completed", result.Status)
-	assert.Equal(t, "test-job-id", result.ReportID)
-	assert.True(t, emailSent)
-	assert.NotNil(t, savedJob)
 }
 
-func TestSendReport_InvalidStartDate(t *testing.T) {
-	svc := createTestService(nil, nil, nil, nil, nil)
-
-	req := &dto.SendReportRequest{
-		StartDate: "invalid-date",
-		EndDate:   "2026-06-10",
-		Email:     "user@test.com",
+func TestSummary_PropagatesRepositoryFailures(t *testing.T) {
+	cases := map[string]*fakeSnapshots{
+		"missing": {missingErr: errBoom},
+		"totals":  {totalsErr: errBoom},
+		"status":  {statusErr: errBoom},
+		"top":     {topErr: errBoom},
 	}
 
-	_, err := svc.SendReport(context.Background(), req)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid start_date")
+	for name, snaps := range cases {
+		svc := newTestService(snaps)
+		if _, err := svc.Summary(context.Background(), "2026-07-16", "2026-07-16"); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
 }
 
-func TestSendReport_CreateJobFails(t *testing.T) {
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			return fmt.Errorf("db down")
-		},
+func TestSummary_RejectsInvalidRangeBeforeQuerying(t *testing.T) {
+	snaps := &fakeSnapshots{}
+	svc := newTestService(snaps)
+
+	_, err := svc.Summary(context.Background(), "2026-07-17", "2026-07-17")
+
+	if !errors.Is(err, ErrInvalidRange) {
+		t.Fatalf("err = %v, want ErrInvalidRange", err)
 	}
-	svc := createTestService(nil, nil, jobMock, nil, nil)
-
-	_, err := svc.SendReport(context.Background(), &dto.SendReportRequest{
-		StartDate: "2026-06-01",
-		EndDate:   "2026-06-01",
-		Email:     "user@test.com",
-	})
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create report job")
-}
-
-func TestSendReport_ProcessingUpdateFails(t *testing.T) {
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "job-id"
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			return fmt.Errorf("db update failed")
-		},
+	if !snaps.gotStart.IsZero() {
+		t.Error("queried the database despite an invalid range")
 	}
-	svc := createTestService(nil, nil, jobMock, nil, nil)
-
-	_, err := svc.SendReport(context.Background(), &dto.SendReportRequest{
-		StartDate: "2026-06-01",
-		EndDate:   "2026-06-01",
-		Email:     "user@test.com",
-	})
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to update report job status")
-}
-
-func TestSendReport_EndDateBeforeStartDate(t *testing.T) {
-	svc := createTestService(nil, nil, nil, nil, nil)
-
-	req := &dto.SendReportRequest{
-		StartDate: "2026-06-10",
-		EndDate:   "2026-06-09",
-		Email:     "user@test.com",
-	}
-
-	_, err := svc.SendReport(context.Background(), req)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "end_date must be on or after start_date")
-}
-
-func TestSendReport_RangeExceeds90Days(t *testing.T) {
-	svc := createTestService(nil, nil, nil, nil, nil)
-
-	req := &dto.SendReportRequest{
-		StartDate: "2026-01-01",
-		EndDate:   "2026-04-01",
-		Email:     "user@test.com",
-	}
-
-	_, err := svc.SendReport(context.Background(), req)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "date range must not exceed 90 days")
-}
-
-func TestSendReport_EmailFails(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{
-				TotalServers: 10,
-				ServersOn:    8,
-				ServersOff:   2,
-				AvgUptimePct: 80.0,
-				TotalChecks:  1000,
-			}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return []dto.ServerUptime{}, nil
-		},
-	}
-
-	var savedJob *model.ReportJob
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "fail-job-id"
-			savedJob = job
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			savedJob = job
-			return nil
-		},
-	}
-
-	emailMock := &emailMocks.EmailSenderMock{
-		SendHTMLFunc: func(ctx context.Context, to, subject, htmlBody string) error {
-			return fmt.Errorf("SMTP auth failed")
-		},
-	}
-
-	svc := createTestService(esMock, nil, jobMock, nil, emailMock)
-
-	req := &dto.SendReportRequest{
-		StartDate: "2026-06-01",
-		EndDate:   "2026-06-10",
-		Email:     "user@test.com",
-	}
-
-	_, err := svc.SendReport(context.Background(), req)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "SMTP auth failed")
-	assert.Equal(t, "failed", savedJob.Status)
-}
-
-func TestSendReport_SummaryFailsMarksJobFailed(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return nil, fmt.Errorf("ES unavailable")
-		},
-	}
-	var savedJob *model.ReportJob
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "summary-fail-id"
-			savedJob = job
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			savedJob = job
-			return nil
-		},
-	}
-	svc := createTestService(esMock, nil, jobMock, nil, nil)
-
-	_, err := svc.SendReport(context.Background(), &dto.SendReportRequest{
-		StartDate: "2026-06-01",
-		EndDate:   "2026-06-01",
-		Email:     "user@test.com",
-	})
-
-	assert.Error(t, err)
-	assert.Equal(t, "failed", savedJob.Status)
-	assert.Contains(t, *savedJob.ErrorMessage, "failed to get uptime summary")
-}
-
-func TestSendReport_CompletedJobUpdateFails(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{TotalServers: 10, ServersOn: 8, ServersOff: 2, AvgUptimePct: 80}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return nil, nil
-		},
-	}
-
-	updateCalls := 0
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "job-id"
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			updateCalls++
-			if job.Status == "completed" {
-				return fmt.Errorf("db update failed")
-			}
-			return nil
-		},
-	}
-	emailMock := &emailMocks.EmailSenderMock{}
-	svc := createTestService(esMock, nil, jobMock, nil, emailMock)
-
-	_, err := svc.SendReport(context.Background(), &dto.SendReportRequest{
-		StartDate: "2026-06-01",
-		EndDate:   "2026-06-01",
-		Email:     "user@test.com",
-	})
-
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to update completed report job")
-	assert.GreaterOrEqual(t, updateCalls, 2)
-}
-
-func TestSendDailyReport_Success(t *testing.T) {
-	summaryCalled := false
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			summaryCalled = true
-			return &dto.ReportSummaryResponse{
-				TotalServers: 500,
-				ServersOn:    485,
-				ServersOff:   15,
-				AvgUptimePct: 97.0,
-				TotalChecks:  50000,
-			}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return []dto.ServerUptime{}, nil
-		},
-	}
-
-	emailSent := false
-	emailMock := &emailMocks.EmailSenderMock{
-		SendHTMLFunc: func(ctx context.Context, to, subject, htmlBody string) error {
-			emailSent = true
-			assert.Equal(t, "admin@test.com", to)
-			assert.Contains(t, subject, "Daily Server Status Report")
-			return nil
-		},
-	}
-
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "daily-job-id"
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			return nil
-		},
-	}
-
-	snapMock := &repoMocks.DailySnapshotRepoMock{
-		CreateFunc: func(ctx context.Context, snapshot *model.DailySnapshot) error {
-			return nil
-		},
-	}
-
-	logger := zerolog.Nop()
-	svc := NewReportService(
-		esMock,
-		nil,
-		jobMock,
-		snapMock,
-		emailMock,
-		nil,
-		config.SMTPConfig{AdminEmail: "admin@test.com"},
-		logger,
-	)
-
-	err := svc.SendDailyReport(context.Background())
-	assert.NoError(t, err)
-	assert.True(t, summaryCalled)
-	assert.True(t, emailSent)
-}
-
-func TestSendDailyReport_SummaryFails(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return nil, fmt.Errorf("ES unavailable")
-		},
-	}
-
-	var savedJob *model.ReportJob
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "daily-fail-id"
-			savedJob = job
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			savedJob = job
-			return nil
-		},
-	}
-
-	logger := zerolog.Nop()
-	svc := NewReportService(
-		esMock,
-		nil,
-		jobMock,
-		nil,
-		nil,
-		nil,
-		config.SMTPConfig{AdminEmail: "admin@test.com"},
-		logger,
-	)
-
-	err := svc.SendDailyReport(context.Background())
-	assert.Error(t, err)
-	assert.NotNil(t, savedJob)
-	assert.Equal(t, "failed", savedJob.Status)
-	assert.NotNil(t, savedJob.ErrorMessage)
-}
-
-func TestSendDailyReport_EmailFailsMarksJobFailed(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{TotalServers: 10, ServersOn: 8, ServersOff: 2, AvgUptimePct: 80}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return nil, nil
-		},
-	}
-	var savedJob *model.ReportJob
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "daily-email-fail-id"
-			savedJob = job
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			savedJob = job
-			return nil
-		},
-	}
-	emailMock := &emailMocks.EmailSenderMock{
-		SendHTMLFunc: func(ctx context.Context, to, subject, htmlBody string) error {
-			return fmt.Errorf("smtp down")
-		},
-	}
-	svc := createTestService(esMock, nil, jobMock, nil, emailMock)
-
-	err := svc.SendDailyReport(context.Background())
-
-	assert.Error(t, err)
-	assert.Equal(t, "failed", savedJob.Status)
-	assert.Contains(t, *savedJob.ErrorMessage, "SMTP error")
-}
-
-func TestSendDailyReport_SnapshotFailsMarksJobFailed(t *testing.T) {
-	esMock := &repoMocks.UptimeCalculatorMock{
-		GetUptimeSummaryFunc: func(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-			return &dto.ReportSummaryResponse{TotalServers: 10, ServersOn: 8, ServersOff: 2, AvgUptimePct: 80}, nil
-		},
-		GetLowUptimeServersFunc: func(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-			return []dto.ServerUptime{{ServerID: "SRV-1", UptimePct: 10}}, nil
-		},
-	}
-	var savedJob *model.ReportJob
-	jobMock := &repoMocks.ReportJobRepoMock{
-		CreateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			job.ID = "daily-snapshot-fail-id"
-			savedJob = job
-			return nil
-		},
-		UpdateFunc: func(ctx context.Context, job *model.ReportJob) error {
-			savedJob = job
-			return nil
-		},
-	}
-	snapMock := &repoMocks.DailySnapshotRepoMock{
-		CreateFunc: func(ctx context.Context, snapshot *model.DailySnapshot) error {
-			return fmt.Errorf("unique violation")
-		},
-	}
-	emailMock := &emailMocks.EmailSenderMock{}
-	svc := createTestService(esMock, nil, jobMock, snapMock, emailMock)
-
-	err := svc.SendDailyReport(context.Background())
-
-	assert.Error(t, err)
-	assert.Equal(t, "failed", savedJob.Status)
-	assert.Contains(t, *savedJob.ErrorMessage, "snapshot save error")
 }

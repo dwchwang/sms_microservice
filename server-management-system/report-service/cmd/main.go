@@ -6,29 +6,26 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/gin-gonic/gin"
-
 	"github.com/vcs-sms/report-service/config"
+	"github.com/vcs-sms/report-service/internal/client"
 	"github.com/vcs-sms/report-service/internal/database"
 	"github.com/vcs-sms/report-service/internal/email"
 	"github.com/vcs-sms/report-service/internal/handler"
 	"github.com/vcs-sms/report-service/internal/repository"
 	"github.com/vcs-sms/report-service/internal/scheduler"
 	"github.com/vcs-sms/report-service/internal/service"
+	"github.com/vcs-sms/report-service/internal/snapshot"
 	"github.com/vcs-sms/shared/logger"
 	"github.com/vcs-sms/shared/middleware"
 )
 
 func main() {
-	// 1. Load config
 	cfg := config.LoadConfig()
 
-	// 2. Init logger
 	log := logger.NewLogger(cfg.App.Name, &logger.LogConfig{
 		Level:      cfg.Log.Level,
 		Dir:        cfg.Log.Dir,
@@ -38,108 +35,99 @@ func main() {
 		Compress:   cfg.Log.Compress,
 	})
 
-	log.Info().Msg("Starting report-service...")
-
-	// 3. Connect PostgreSQL
-	db := database.Connect(cfg.ReportDB)
-
-	// 4. Connect Redis
-	rdb := database.ConnectRedis(cfg.Redis)
-
-	// 5. Connect Elasticsearch
-	esAddrs := strings.Split(cfg.ES.Addresses, ",")
-	for i, addr := range esAddrs {
-		esAddrs[i] = strings.TrimSpace(addr)
-		if !strings.HasPrefix(esAddrs[i], "http") {
-			esAddrs[i] = "http://" + esAddrs[i] + ":9200"
-		}
-	}
-
-	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
-		Addresses: esAddrs,
-		Username:  cfg.ES.Username,
-		Password:  cfg.ES.Password,
-	})
+	loc, err := time.LoadLocation(config.ReportTimezone)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create Elasticsearch client")
+		log.Fatal().Err(err).Msg("Failed to load the report timezone")
 	}
 
-	// 6. Init repositories
-	esUptimeRepo := repository.NewESUptimeRepo(esClient, cfg.ES.IndexName)
-	serverCounterRepo := repository.NewServerCounterRepo(db)
-	reportJobRepo := repository.NewReportJobRepo(db)
-	snapshotRepo := repository.NewDailySnapshotRepo(db)
+	db := database.Connect(cfg.Database)
 
-	// 7. Init email sender
-	emailSender := email.NewGmailSender(cfg.SMTP)
+	esClient, err := database.ConnectES(cfg.ES)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to connect to Elasticsearch")
+	}
 
-	// 8. Init service
-	reportSvc := service.NewReportService(
-		esUptimeRepo,
-		serverCounterRepo,
-		reportJobRepo,
-		snapshotRepo,
-		emailSender,
-		rdb,
-		cfg.SMTP,
-		log,
+	snapshotRepo := repository.NewSnapshotRepository(db)
+	jobRepo := repository.NewJobRepository(db)
+	aggregator := repository.NewUptimeAggregator(esClient, cfg.ES.IndexPrefix)
+	serverClient := client.NewServerClient(cfg.Server.BaseURL, cfg.Server.Timeout)
+
+	renderer, err := email.NewRenderer()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to compile the report template")
+	}
+	sender := email.NewGmailSender(
+		cfg.SMTP.Host, cfg.SMTP.Port, cfg.SMTP.Username,
+		cfg.SMTP.Password, cfg.SMTP.From, cfg.SMTP.RecipientDomains,
 	)
 
-	// 9. Init handler
-	reportHandler := handler.NewReportHandler(reportSvc)
+	reportSvc := service.NewReportService(
+		snapshotRepo, loc, cfg.Report.MaxRangeDays, cfg.Report.CoverageThresholdPct)
+	sendSvc := service.NewSendService(reportSvc, jobRepo, sender, renderer, loc, log)
+	snapshotJob := snapshot.NewJob(serverClient, aggregator, snapshotRepo, loc, log)
+	reportHandler := handler.NewReportHandler(reportSvc, sendSvc)
 
-	// 10. Setup Gin router
-	gin.SetMode(gin.ReleaseMode)
-	router := gin.New()
-	router.Use(gin.Recovery())
-	router.Use(middleware.RequestIDMiddleware())
+	cron := scheduler.NewScheduler(snapshotJob, sendSvc, cfg.Report.DailyRecipient, loc, log)
+	if err := cron.Register(cfg.Report.SnapshotCron, cfg.Report.DailyCron); err != nil {
+		log.Fatal().Err(err).Msg("Failed to register scheduled jobs")
+	}
+	cron.Start()
 
-	// Health check
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"service": cfg.App.Name,
-			"time":    time.Now().Format(time.RFC3339),
-		})
+	if cfg.App.Env == "production" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(middleware.RequestIDMiddleware())
+	r.Use(middleware.LoggerMiddleware(log))
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Report routes
-	api := router.Group("/api/v1")
+	reports := r.Group("/api/v1/reports")
 	{
-		api.GET("/reports/summary", reportHandler.GetSummary)
-		api.POST("/reports", reportHandler.SendReport)
+		reports.GET("/summary", reportHandler.GetSummary)
+		reports.POST("", reportHandler.SendReport)
+		reports.GET("/:id", reportHandler.GetReport)
 	}
 
-	// 11. Start cron scheduler in background
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// Lets an operator re-run a snapshot whose 00:30 job failed, without
+	// waiting a day. Internal only: not published through Traefik.
+	r.POST("/internal/snapshots/:date", func(c *gin.Context) {
+		date, err := time.ParseInLocation(time.DateOnly, c.Param("date"), loc)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "date must be YYYY-MM-DD"})
+			return
+		}
+		result, err := snapshotJob.Run(c.Request.Context(), date)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, result)
+	})
 
-	dailyCron := scheduler.NewDailyReportCron(reportSvc, "0 8 * * *", log)
-	go dailyCron.Start(ctx)
-
-	// 12. Setup graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-
+	addr := fmt.Sprintf(":%s", cfg.App.Port)
+	srv := &http.Server{Addr: addr, Handler: r}
 	go func() {
-		<-quit
-		log.Info().Msg("Shutting down report-service...")
-		cancel()
+		log.Info().Str("addr", addr).Msg("Starting report service")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("Failed to start report service")
+		}
 	}()
 
-	// 13. Start HTTP server
-	addr := fmt.Sprintf(":%s", cfg.App.Port)
-	log.Info().Str("addr", addr).Msg("Report service started")
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Info().Msg("Shutting down report service...")
 
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("Report service forced to shutdown")
 	}
+	cron.Stop()
 
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal().Err(err).Msg("Failed to start HTTP server")
-	}
+	log.Info().Msg("Report service exited")
 }

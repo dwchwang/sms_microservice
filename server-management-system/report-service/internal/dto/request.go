@@ -1,8 +1,14 @@
 package dto
 
-// SendReportRequest represents the request body for sending a report.
+// SummaryRequest is the query for GET /reports/summary.
+type SummaryRequest struct {
+	StartDate string `form:"start_date" binding:"required"`
+	EndDate   string `form:"end_date" binding:"required"`
+}
+
+// SendReportRequest is the body of POST /reports.
 type SendReportRequest struct {
-	StartDate string `json:"start_date" binding:"required"`  // "2006-01-02"
-	EndDate   string `json:"end_date" binding:"required"`    // "2006-01-02"
-	Email     string `json:"email" binding:"required,email"` // recipient email
+	StartDate      string `json:"start_date" binding:"required"`
+	EndDate        string `json:"end_date" binding:"required"`
+	RecipientEmail string `json:"recipient_email" binding:"required,email"`
 }

@@ -69,8 +69,6 @@ var (
 		Message:  "Email đã được sử dụng",
 	}
 
-
-
 	ErrInvalidCredentials = &AppError{
 		HTTPCode: http.StatusUnauthorized,
 		Code:     "INVALID_CREDENTIALS",
@@ -105,12 +103,6 @@ var (
 		HTTPCode: http.StatusInternalServerError,
 		Code:     "ES_ERROR",
 		Message:  "Lỗi Elasticsearch",
-	}
-
-	ErrKafkaError = &AppError{
-		HTTPCode: http.StatusInternalServerError,
-		Code:     "KAFKA_ERROR",
-		Message:  "Lỗi Kafka",
 	}
 
 	ErrEmailError = &AppError{

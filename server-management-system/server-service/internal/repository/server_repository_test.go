@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
@@ -12,6 +13,8 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
+
+func intPtr(v int) *int { return &v }
 
 func setupServerTestDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 	mockDB, mock, err := sqlmock.New()
@@ -26,27 +29,45 @@ func setupServerTestDB(t *testing.T) (*gorm.DB, sqlmock.Sqlmock) {
 	return db, mock
 }
 
-func TestServerRepository_Create(t *testing.T) {
+// The bug this guards: a NULL column scanning into a plain int yields 0, and
+// Save() then writes that 0 back, which CHECK (IS NULL OR > 0) rejects. Pointer
+// fields keep NULL as nil all the way round.
+func TestServerRepository_NullOptionalNumbersScanAsNil(t *testing.T) {
 	db, mock := setupServerTestDB(t)
 	repo := NewServerRepository(db)
 
-	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "servers"`)).
-		WithArgs(
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(),
-			sqlmock.AnyArg(),
-		).
+	rows := sqlmock.NewRows([]string{"id", "server_id", "server_name", "status", "ipv4", "tcp_port", "cpu_cores", "ram_gb", "disk_gb"}).
+		AddRow(uuid.New(), "SRV-001", "test", "UNKNOWN", "10.0.0.1", 80, nil, nil, nil)
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "servers"`)).WillReturnRows(rows)
+
+	got, err := repo.FindByServerID(context.Background(), "SRV-001")
+	if err != nil {
+		t.Fatalf("FindByServerID failed: %v", err)
+	}
+
+	if got.CPUCores != nil || got.RAMGB != nil || got.DiskGB != nil {
+		t.Errorf("NULL columns scanned as %v/%v/%v, want nil — a 0 here would be written back and rejected",
+			got.CPUCores, got.RAMGB, got.DiskGB)
+	}
+}
+
+func TestServerRepository_Create_IncludesSetOptionalNumbers(t *testing.T) {
+	db, mock := setupServerTestDB(t)
+	repo := NewServerRepository(db)
+
+	mock.ExpectQuery(`INSERT INTO "servers" .*cpu_cores.*ram_gb.*disk_gb.* VALUES`).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	s := &model.Server{
-		ServerID: "SRV-001", ServerName: "test", Status: "off",
-		IPv4: "10.0.0.1",
+		ServerID: "SRV-001", ServerName: "test", Status: "UNKNOWN",
+		IPv4: "10.0.0.1", TCPPort: 80,
+		CPUCores: intPtr(4), RAMGB: intPtr(16), DiskGB: intPtr(500),
 	}
-	err := repo.Create(context.Background(), s)
-	if err != nil {
+	if err := repo.Create(context.Background(), s); err != nil {
 		t.Fatalf("Create failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
 	}
 }
 
@@ -276,5 +297,78 @@ func TestServerRepository_Update(t *testing.T) {
 	err := repo.Update(context.Background(), s)
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
+	}
+}
+
+func TestServerRepository_FindActiveTargets(t *testing.T) {
+	db, mock := setupServerTestDB(t)
+	repo := NewServerRepository(db)
+
+	mock.ExpectQuery(`SELECT "server_id","server_name","ipv4","tcp_port" FROM "servers" WHERE server_id > \$1 AND "servers"."deleted_at" IS NULL ORDER BY server_id ASC LIMIT \$2`).
+		WithArgs("SRV-001", 2).
+		WillReturnRows(sqlmock.NewRows([]string{"server_id", "server_name", "ipv4", "tcp_port"}).
+			AddRow("SRV-002", "web-02", "10.0.0.2", 8080).
+			AddRow("SRV-003", "web-03", "10.0.0.3", 9090))
+
+	servers, err := repo.FindActiveTargets(context.Background(), "SRV-001", 2)
+	if err != nil {
+		t.Fatalf("FindActiveTargets failed: %v", err)
+	}
+
+	if len(servers) != 2 {
+		t.Fatalf("got %d servers, want 2", len(servers))
+	}
+	if servers[0].ServerID != "SRV-002" || servers[0].TCPPort != 8080 {
+		t.Errorf("unexpected first target %#v", servers[0])
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestServerRepository_ApplyStatusEvent(t *testing.T) {
+	db, mock := setupServerTestDB(t)
+	repo := NewServerRepository(db)
+	changedAt := time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)
+
+	mock.ExpectExec(`UPDATE "servers" SET .* WHERE \(server_id = \$[0-9]+ AND status_version < \$[0-9]+\) AND "servers"."deleted_at" IS NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	rows, err := repo.ApplyStatusEvent(context.Background(), StatusUpdate{
+		ServerID:      "SRV-001",
+		Status:        "ON",
+		ChangedAt:     changedAt,
+		StatusVersion: 42,
+		StreamID:      "1700000000-0",
+	})
+	if err != nil {
+		t.Fatalf("ApplyStatusEvent failed: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("rows = %d, want 1", rows)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet expectations: %v", err)
+	}
+}
+
+func TestServerRepository_ApplyStatusEvent_StaleReturnsZeroRows(t *testing.T) {
+	db, mock := setupServerTestDB(t)
+	repo := NewServerRepository(db)
+
+	mock.ExpectExec(`UPDATE "servers" SET`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	rows, err := repo.ApplyStatusEvent(context.Background(), StatusUpdate{
+		ServerID:      "SRV-001",
+		Status:        "ON",
+		ChangedAt:     time.Now().UTC(),
+		StatusVersion: 1,
+		StreamID:      "1700000000-0",
+	})
+	if err != nil {
+		t.Fatalf("ApplyStatusEvent failed: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("rows = %d, want 0 for a stale event", rows)
 	}
 }

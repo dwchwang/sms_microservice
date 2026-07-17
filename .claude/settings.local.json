@@ -31,7 +31,10 @@
       "Bash(go test *)",
       "Bash(docker exec *)",
       "Bash(docker compose *)",
-      "Bash(go run *)"
+      "Bash(go run *)",
+      "Read(//Users/dwchwang/.claude/projects/-Users-dwchwang-Downloads-sms-microservice/memory/**)",
+      "Bash(mv no-design-reference-comments.md code-comment-style.md)",
+      "Bash(sed -i '' 's|- \\\\[No design-reference comments\\\\]\\(no-design-reference-comments.md\\).*|- [Code comment style]\\(code-comment-style.md\\) — comment tối đa 1 dòng, không trỏ mục design.md|' MEMORY.md)"
     ]
   }
 }

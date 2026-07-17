@@ -31,6 +31,17 @@ http:
   # Routers
   # ============================================
   routers:
+    # Import is synchronous and may run ~8s for 10.000 rows, so it gets its own
+    # transport with a longer header timeout. Path() outranks the PathPrefix
+    # rule below, so this wins for the import URL only.
+    server-import:
+      rule: "Path(`/api/v1/servers/import`)"
+      priority: 100
+      service: server-service-import
+      middlewares:
+        - forward-auth
+        - rate-limit-global
+
     server-api:
       rule: "PathPrefix(`/api/v1/servers`)"
       service: server-service
@@ -59,6 +70,11 @@ http:
       loadBalancer:
         servers:
           - url: "http://server-service:8082"
+    server-service-import:
+      loadBalancer:
+        serversTransport: import-transport
+        servers:
+          - url: "http://server-service:8082"
     report-service:
       loadBalancer:
         servers:
@@ -67,3 +83,11 @@ http:
       loadBalancer:
         servers:
           - url: "http://auth-service:8081"
+
+  # ============================================
+  # Transports
+  # ============================================
+  serversTransports:
+    import-transport:
+      forwardingTimeouts:
+        responseHeaderTimeout: 120s

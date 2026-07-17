@@ -7,9 +7,18 @@ info:
     ## Tính năng chính
     - **Auth**: Đăng ký, đăng nhập, JWT, RBAC (Admin / Operator / Viewer)
     - **Server CRUD**: Tạo, xem (filter/sort/paging), cập nhật, xóa
-    - **Import/Export Excel**: Upload .xlsx để import hàng loạt, export ra file
+    - **Import/Export Excel**: Import đồng bộ trong một request, export ra .xlsx
     - **Monitoring**: Health-check TCP 10.000 server mỗi 60s, ghi Elasticsearch
     - **Báo cáo**: Báo cáo định kỳ qua Email + API báo cáo chủ động
+
+    ## Monitoring không có public endpoint
+    Người dùng xem trạng thái mới nhất qua `GET /servers` (status đọc từ
+    PostgreSQL, cập nhật qua Redis Stream) và `GET /servers/stats`. Với chu kỳ
+    ping 60 giây, độ mới của dữ liệu luôn nằm trong một phút.
+
+    ## Idempotency
+    `POST /servers` và `POST /servers/import` yêu cầu header `Idempotency-Key`.
+    Cùng key + cùng body trả lại response cũ; cùng key + body khác trả 409.
     
     ## Authentication
     Tất cả API (trừ register, login, refresh) yêu cầu JWT Bearer token.
@@ -19,7 +28,7 @@ info:
     ```json
     {
       "status": "error",
-      "code": 42201,
+      "code": "SERVER_VALIDATION_FAILED",
       "message": "Validation failed",
       "errors": [{ "field": "ipv4", "code": "INVALID_FORMAT", "message": "..." }],
       "meta": { "request_id": "req-uuid", "timestamp": "2026-06-10T10:00:00Z" }
@@ -149,7 +158,7 @@ components:
           type: array
           items:
             type: string
-          example: ["server:create", "server:read", "server:update", "server:delete", "server:import", "server:export", "monitor:view", "report:view", "report:send", "user:manage"]
+          example: ["server:create", "server:list", "server:view", "server:update", "server:delete", "server:import", "server:export", "server:stats", "report:view", "report:send", "report:view_detail", "user:list", "user:manage_role"]
         is_active:
           type: boolean
           example: true
@@ -209,9 +218,17 @@ components:
           maxLength: 255
           example: web-new-01
         ipv4:
+          description: Phải nằm trong CIDR allowlist; loopback/link-local/multicast/metadata bị từ chối.
           type: string
           format: ipv4
           example: 10.0.1.100
+        tcp_port:
+          description: Cổng TCP để kiểm tra trạng thái. Mặc định 80.
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 80
+          example: 9001
         os:
           type: string
           example: Ubuntu 22.04
@@ -220,9 +237,8 @@ components:
           minimum: 1
           example: 8
         ram_gb:
-          type: number
-          format: double
-          minimum: 0
+          type: integer
+          minimum: 1
           example: 16
         disk_gb:
           type: number
@@ -238,6 +254,10 @@ components:
 
     UpdateServerRequest:
       type: object
+      description: |
+        `server_id` không đổi được. `status`, `status_changed_at` và
+        `last_status_check` cũng không: chúng do Monitoring quyết định, client
+        gửi lên sẽ bị bỏ qua.
       properties:
         server_name:
           type: string
@@ -246,33 +266,29 @@ components:
         ipv4:
           type: string
           format: ipv4
+        tcp_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
         os:
           type: string
         cpu_cores:
           type: integer
           minimum: 1
         ram_gb:
-          type: number
-          format: double
-          minimum: 0
+          type: integer
+          minimum: 1
         disk_gb:
-          type: number
-          format: double
-          minimum: 0
+          type: integer
+          minimum: 1
         location:
           type: string
         description:
           type: string
-        status:
-          type: string
-          enum: [on, off]
 
     ServerResponse:
       type: object
       properties:
-        id:
-          type: string
-          format: uuid
         server_id:
           type: string
           example: SRV-00001
@@ -280,12 +296,36 @@ components:
           type: string
           example: web-0001
         status:
+          description: |
+            Đọc từ PostgreSQL, cập nhật qua Redis Stream từ Monitoring. Filter,
+            sort và giá trị hiển thị đều đến từ cùng một câu SELECT.
+            `UNKNOWN` = server chưa từng được kiểm tra.
           type: string
-          enum: [on, off]
-          example: "on"
+          enum: [ON, OFF, UNKNOWN]
+          example: "ON"
+        status_changed_at:
+          description: Thời điểm status đổi giá trị lần gần nhất.
+          type: string
+          format: date-time
+          nullable: true
+        last_status_check:
+          description: |
+            Thời điểm kiểm tra gần nhất. Đọc thẳng từ Redis lúc serialize, không
+            lưu trong PostgreSQL — nó đổi mỗi 60 giây cho cả 10.000 server.
+            Display-only: **không filter, không sort**. `null` khi Redis không
+            phản hồi hoặc server chưa được kiểm tra lần nào.
+          type: string
+          format: date-time
+          nullable: true
         ipv4:
           type: string
           example: 10.10.1.11
+        tcp_port:
+          description: Cổng TCP dùng để kiểm tra trạng thái.
+          type: integer
+          minimum: 1
+          maximum: 65535
+          example: 9001
         os:
           type: string
           example: Ubuntu 22.04
@@ -293,10 +333,10 @@ components:
           type: integer
           example: 8
         ram_gb:
-          type: number
+          type: integer
           example: 16
         disk_gb:
-          type: number
+          type: integer
           example: 500
         location:
           type: string
@@ -331,173 +371,208 @@ components:
             $ref: '#/components/schemas/ServerResponse'
 
     # ── Import/Export ──
-    ImportJobResponse:
+    ImportResult:
       type: object
       properties:
-        job_id:
-          type: string
-          format: uuid
-          example: "550e8400-e29b-41d4-a716-446655440001"
-        status:
-          type: string
-          enum: [pending, processing, completed, failed]
-          example: pending
-        file_name:
-          type: string
-          example: servers.xlsx
-        message:
-          type: string
-          example: "File đã được nhận, đang xử lý bất đồng bộ"
-
-    ImportJobStatusResponse:
-      type: object
-      properties:
-        job_id:
-          type: string
-          format: uuid
-        status:
-          type: string
-          enum: [pending, processing, completed, failed]
-          example: completed
-        file_name:
-          type: string
         total_rows:
           type: integer
-          example: 500
-        success_count:
-          type: integer
-          example: 480
-        failed_count:
-          type: integer
-          example: 20
-        success_list:
-          type: array
-          items:
-            type: object
-            properties:
-              row_number:
-                type: integer
-              server_id:
+          example: 10000
+        succeeded:
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 9940
+            items:
+              type: array
+              items:
                 type: string
-              server_name:
+              example: ["SRV-00001", "SRV-00002"]
+        failed:
+          description: Dòng bị loại vì lỗi validate. Các dòng khác vẫn được import.
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 10
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  row:
+                    type: integer
+                    example: 42
+                  server_id:
+                    type: string
+                    example: "SRV-00042"
+                  reason:
+                    type: string
+                    enum: [MISSING_SERVER_ID, MISSING_SERVER_NAME, MISSING_IPV4, INVALID_IPV4, MISSING_TCP_PORT, INVALID_TCP_PORT, SERVER_IP_NOT_ALLOWED, DATABASE_ERROR]
+                    example: INVALID_IPV4
+        skipped_duplicate:
+          description: Trùng `server_id` hoặc `server_name`, trong chính file hoặc đã có trong DB.
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 50
+            items:
+              type: array
+              items:
                 type: string
-              status:
-                type: string
-                example: success
-              reason:
-                type: string
-        failed_list:
-          type: array
-          items:
-            type: object
-            properties:
-              row_number:
-                type: integer
-              server_id:
-                type: string
-              server_name:
-                type: string
-              status:
-                type: string
-                example: failed
-              reason:
-                type: string
-        error_message:
-          type: string
-        started_at:
-          type: string
-          format: date-time
-        completed_at:
-          type: string
-          format: date-time
-        created_at:
-          type: string
-          format: date-time
+              example: ["SRV-00003"]
 
     ExportRequest:
       type: object
-      description: Export filters are sent as top-level fields. The service also accepts the legacy nested `filter` object for backward compatibility.
+      description: |
+        Dùng chung bộ filter/sort với `GET /servers`, nên hai view không thể lệch
+        nhau. Body rỗng nghĩa là export tất cả. Dùng POST vì filter có thể dài
+        quá giới hạn query string — đây là lựa chọn có chủ đích, không phải nhầm
+        về REST semantics.
       properties:
         status:
           type: string
-          enum: [on, off]
-          example: on
+          enum: [ON, OFF, UNKNOWN]
+          example: "ON"
+        server_id:
+          type: string
         server_name:
           type: string
-          example: web
         ipv4:
           type: string
-          example: 10.0.1
-        location:
-          type: string
-          example: DC-HN
         os:
           type: string
-          example: Ubuntu
+        location:
+          type: string
         sort_by:
           type: string
           enum: [server_id, server_name, status, ipv4, location, created_at, updated_at]
-          example: created_at
         sort_order:
           type: string
           enum: [asc, desc]
-          example: desc
-        page:
-          type: integer
-          minimum: 1
-          example: 1
-        page_size:
-          type: integer
-          minimum: 1
-          maximum: 10000
-          example: 100
 
-    # ── Report ──
     ReportSummaryResponse:
       type: object
+      description: |
+        Hai loại số liệu cùng tồn tại có chủ đích. `servers_on_at_end_at` /
+        `servers_off_at_end_at` là ảnh chụp tại một thời điểm (cuối kỳ report) —
+        đúng thứ đề bài hỏi. Phân bố uptime mới là thứ mô tả cả khoảng thời gian.
+        Tên dài để không ai hiểu nhầm hai thứ đó là một.
       properties:
         start_date:
           type: string
           format: date
-          example: "2026-06-01"
+          example: "2026-07-15"
         end_date:
           type: string
           format: date
-          example: "2026-06-07"
+          example: "2026-07-15"
         total_servers:
           type: integer
           example: 10000
-        servers_on:
+        servers_on_at_end_at:
+          description: Số server có status cuối kỳ là ON (lúc 23:59:59 của end_date).
           type: integer
-          example: 9523
-        servers_off:
+          example: 9940
+        servers_off_at_end_at:
           type: integer
-          example: 477
+          example: 58
         avg_uptime_pct:
+          description: |
+            Trung bình trên các server **có data**. `null` khi không server nào
+            có data — không phải 0, vì "không đo được" khác "down".
           type: number
-          format: double
-          example: 97.85
-        total_checks:
+          nullable: true
+          format: float
+          example: 99.2
+        servers_uptime_100:
           type: integer
-          format: int64
-          example: 120000
-        low_uptime_servers:
+          example: 9512
+        servers_uptime_partial:
+          type: integer
+          example: 428
+        servers_uptime_0:
+          type: integer
+          example: 60
+        servers_no_data:
+          description: Server thuộc population nhưng không có health fact nào.
+          type: integer
+          example: 2
+        expected_checks:
+          description: Tổng số check kỳ vọng, tính theo lifecycle từng server.
+          type: integer
+          example: 14400000
+        actual_checks:
+          type: integer
+          example: 14371200
+        coverage_pct:
+          description: |
+            `actual_checks / expected_checks * 100`. Server không có data vẫn góp
+            vào mẫu số, nên thiếu dữ liệu làm coverage tụt thay vì biến mất.
+          type: number
+          format: float
+          example: 99.8
+        degraded:
+          description: '`true` khi coverage dưới ngưỡng (mặc định 95%).'
+          type: boolean
+          example: false
+        top_10_lowest_uptime:
+          description: Loại server no_data — không xếp hạng thứ chưa đo được.
           type: array
           items:
             type: object
             properties:
               server_id:
                 type: string
+                example: "SRV-04412"
               server_name:
                 type: string
+                example: "web-prod-12"
               uptime_pct:
                 type: number
-              total_checks:
-                type: integer
-                format: int64
-              on_checks:
-                type: integer
-                format: int64
+                format: float
+                example: 0.0
+
+    ReportJob:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        report_type:
+          type: string
+          enum: [daily, on-demand]
+        state:
+          description: |
+            `delivery_unknown` = mất kết nối SMTP sau khi gửi body; không biết
+            email đã đến chưa. Không retry mù.
+          type: string
+          enum: [processing, generated, sending, sent, failed, delivery_unknown]
+          example: sent
+        start_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+        recipient_email:
+          type: string
+          format: email
+        smtp_message_id:
+          type: string
+          example: "<1784219923.abc123@vcs.com.vn>"
+        error_message:
+          type: string
+        summary:
+          $ref: '#/components/schemas/ReportSummaryResponse'
+        created_at:
+          type: string
+          format: date-time
+        sent_at:
+          type: string
+          format: date-time
+          nullable: true
 
     SendReportRequest:
       type: object
@@ -760,11 +835,11 @@ paths:
       tags: [Users]
       summary: Lấy danh sách người dùng (Admin only)
       description: |
-        **Scope:** `user:manage`
+        **Scope:** `user:manage_role`
         **Role:** Admin only
       operationId: listUsers
       security:
-        - BearerAuth: [user:manage]
+        - BearerAuth: [user:manage_role]
       parameters:
         - name: page
           in: query
@@ -800,7 +875,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Không có scope `user:manage`
+          description: Không có scope `user:manage_role`
           content:
             application/json:
               schema:
@@ -813,11 +888,11 @@ paths:
       description: |
         Admin có thể nâng cấp hoặc hạ cấp role của user khác.
         Không thể tự thay đổi role của chính mình.
-        **Scope:** `user:manage`
+        **Scope:** `user:manage_role`
         **Role:** Admin only
       operationId: updateUserRole
       security:
-        - BearerAuth: [user:manage]
+        - BearerAuth: [user:manage_role]
       parameters:
         - name: user_id
           in: path
@@ -857,7 +932,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Không có scope `user:manage`
+          description: Không có scope `user:manage_role`
           content:
             application/json:
               schema:
@@ -934,17 +1009,16 @@ paths:
       tags: [Servers]
       summary: Lấy danh sách server (filter, sort, paging)
       description: |
-        **Scope:** `server:read`
-        **Role:** Admin, Operator, Viewer
+        **Scope:** `server:list`
       operationId: listServers
       security:
-        - BearerAuth: [server:read]
+        - BearerAuth: [server:list]
       parameters:
         - name: status
           in: query
           schema:
             type: string
-            enum: [on, off]
+            enum: [ON, OFF, UNKNOWN]
           description: Lọc theo trạng thái
         - name: server_name
           in: query
@@ -1014,7 +1088,53 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Không có scope `server:read`
+          description: Không có scope `server:view`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /servers/stats:
+    get:
+      tags: [Servers]
+      summary: Số lượng server theo trạng thái hiện tại
+      description: |
+        Phục vụ dashboard realtime. Cache 10 giây.
+
+        Khác với `servers_on_at_end_at` trong báo cáo: endpoint này trả số ON/OFF
+        **hiện tại**, còn báo cáo trả số **tại cuối kỳ report**.
+
+        **Scope:** `server:stats`
+      operationId: getServerStats
+      security:
+        - BearerAuth: [server:stats]
+      responses:
+        '200':
+          description: Thống kê trạng thái
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          total:
+                            type: integer
+                            example: 10000
+                          on:
+                            type: integer
+                            example: 9940
+                          off:
+                            type: integer
+                            example: 58
+                          unknown:
+                            type: integer
+                            example: 2
+        '401':
+          description: Thiếu JWT token
           content:
             application/json:
               schema:
@@ -1025,11 +1145,11 @@ paths:
       tags: [Servers]
       summary: Xem chi tiết 1 server
       description: |
-        **Scope:** `server:read`
+        **Scope:** `server:view`
         **Role:** Admin, Operator, Viewer
       operationId: getServer
       security:
-        - BearerAuth: [server:read]
+        - BearerAuth: [server:view]
       parameters:
         - name: server_id
           in: path
@@ -1193,13 +1313,26 @@ paths:
       tags: [Import/Export]
       summary: Import danh sách server từ file Excel
       description: |
-        Upload file .xlsx. Xử lý bất đồng bộ qua Kafka.
-        Bỏ qua các `server_id` hoặc `server_name` đã tồn tại.
+        Upload file .xlsx. Xử lý **đồng bộ** trong một request, tối đa 10.000 dòng.
+
+        Lỗi cấp file (không phải .xlsx, sai template, vượt 10.000 dòng) reject
+        toàn bộ. Lỗi cấp dòng chỉ loại dòng đó — các dòng hợp lệ vẫn được import.
+
+        Kết quả chia ba nhóm: `succeeded`, `failed` (kèm số dòng và lý do), và
+        `skipped_duplicate` (trùng `server_id`/`server_name`, trong file hoặc DB).
+
         **Scope:** `server:import`
-        **Role:** Admin only
+        **Header bắt buộc:** `Idempotency-Key`
       operationId: importServers
       security:
         - BearerAuth: [server:import]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Gửi lại cùng key và cùng file sẽ trả lại response cũ, không import lần hai.
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -1211,59 +1344,10 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: File Excel .xlsx
-      responses:
-        '202':
-          description: File đã nhận, đang xử lý
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/SuccessResponse'
-                  - type: object
-                    properties:
-                      data:
-                        $ref: '#/components/schemas/ImportJobResponse'
-        '400':
-          description: File không hợp lệ (sai format, không phải .xlsx)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          description: Thiếu JWT token
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: Không có scope `server:import`
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /servers/import/{job_id}:
-    get:
-      tags: [Import/Export]
-      summary: Kiểm tra tiến độ job import
-      description: |
-        **Scope:** `server:import`
-        **Role:** Admin only
-      operationId: getImportStatus
-      security:
-        - BearerAuth: [server:import]
-      parameters:
-        - name: job_id
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-          example: "550e8400-e29b-41d4-a716-446655440001"
+                  description: File Excel .xlsx theo template 10 cột
       responses:
         '200':
-          description: Trạng thái job import
+          description: Import hoàn tất (kể cả khi có dòng lỗi)
           content:
             application/json:
               schema:
@@ -1272,21 +1356,27 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/ImportJobStatusResponse'
-        '401':
-          description: Thiếu JWT token
+                        $ref: '#/components/schemas/ImportResult'
+                      meta:
+                        type: object
+                        properties:
+                          duration_ms:
+                            type: integer
+                            example: 8120
+        '400':
+          description: Thiếu file hoặc thiếu `Idempotency-Key`
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: Không có scope `server:import`
+        '409':
+          description: '`Idempotency-Key` đã dùng với nội dung khác'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Job không tồn tại
+        '422':
+          description: 'File bị reject: `SERVER_IMPORT_FILE_REJECTED`'
           content:
             application/json:
               schema:
@@ -1336,62 +1426,9 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
   # ═══ MONITOR ═══
-  /monitor/status:
-    get:
-      tags: [Monitor]
-      summary: Xem trạng thái Monitor Service
-      description: |
-        **Scope:** `monitor:view`
-        **Role:** Admin, Operator
-      operationId: getMonitorStatus
-      security:
-        - BearerAuth: [monitor:view]
-      responses:
-        '200':
-          description: Monitor service status
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ok
-                  service:
-                    type: string
-                    example: monitor-service
-                  check_interval:
-                    type: integer
-                    example: 60
-                  worker_count:
-                    type: integer
-                    example: 100
-                  tcp_timeout_ms:
-                    type: integer
-                    example: 5000
-                  elasticsearch:
-                    type: string
-                    example: http://elasticsearch:9200
-                  index:
-                    type: string
-                    example: server-status-logs
-                  redis_available:
-                    type: boolean
-                    example: true
-        '401':
-          description: Thiếu JWT token
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: Không có scope `monitor:view`
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+  # Monitoring không có public endpoint. Người dùng xem trạng thái mới nhất qua
+  # GET /servers (status đọc từ PostgreSQL) và GET /servers/stats.
 
-  # ═══ REPORTS ═══
   /reports/summary:
     get:
       tags: [Reports]
@@ -1496,6 +1533,48 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Lỗi gửi email (SMTP fail)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /reports/{id}:
+    get:
+      tags: [Reports]
+      summary: Xem một report job
+      description: |
+        Trả về trạng thái job và bản báo cáo đã sinh.
+
+        State `delivery_unknown` nghĩa là kết nối SMTP đứt sau khi body đã lên
+        dây — không biết email đã đến hay chưa. **Không retry mù**: tra
+        `smtp_message_id` trong hộp thư Sent trước, nếu cần gửi lại thì tạo job
+        mới với `Idempotency-Key` mới.
+
+        **Scope:** `report:view_detail`
+      operationId: getReport
+      security:
+        - BearerAuth: [report:view_detail]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Report job
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ReportJob'
+        '404':
+          description: Không tìm thấy job
           content:
             application/json:
               schema:

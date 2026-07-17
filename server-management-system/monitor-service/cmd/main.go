@@ -6,31 +6,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/gin-gonic/gin"
-
 	"github.com/vcs-sms/monitor-service/config"
-	"github.com/vcs-sms/monitor-service/internal/checker"
 	"github.com/vcs-sms/monitor-service/internal/database"
+	"github.com/vcs-sms/monitor-service/internal/monitor"
 	"github.com/vcs-sms/monitor-service/internal/repository"
-	"github.com/vcs-sms/monitor-service/internal/scheduler"
-	"github.com/vcs-sms/monitor-service/internal/service"
-	"github.com/vcs-sms/monitor-service/internal/worker"
-	"github.com/vcs-sms/shared/kafka"
 	"github.com/vcs-sms/shared/logger"
-	"github.com/vcs-sms/shared/middleware"
 )
 
 func main() {
-	// 1. Load config
 	cfg := config.LoadConfig()
 
-	// 2. Init logger
 	log := logger.NewLogger(cfg.App.Name, &logger.LogConfig{
 		Level:      cfg.Log.Level,
 		Dir:        cfg.Log.Dir,
@@ -40,182 +30,84 @@ func main() {
 		Compress:   cfg.Log.Compress,
 	})
 
-	log.Info().Msg("Starting monitor-service...")
-
 	if err := cfg.Monitor.Validate(); err != nil {
 		log.Fatal().Err(err).Msg("Invalid monitor configuration")
 	}
 
-	// 3. Connect DBs (2 connections: monitor_schema + server_schema)
-	monitorDB := database.Connect(cfg.MonitorDB)
-	serverDB := database.Connect(cfg.ServerDB)
-
-	// 4. Connect Redis
 	rdb := database.ConnectRedis(cfg.Redis)
-	var redisClient scheduler.RedisClient
-	if rdb != nil {
-		redisClient = scheduler.NewRealRedisClient(rdb)
-	}
 
-	// 5. Connect Elasticsearch
-	esCfg := elasticsearch.Config{
-		Addresses: strings.Split(cfg.ES.Addresses, ","),
-	}
-	if cfg.ES.Username != "" {
-		esCfg.Username = cfg.ES.Username
-		esCfg.Password = cfg.ES.Password
-	}
-	esClient, err := elasticsearch.NewClient(esCfg)
+	esClient, err := database.ConnectES(database.ESConfig{
+		Addresses:   cfg.ES.Addresses,
+		Username:    cfg.ES.Username,
+		Password:    cfg.ES.Password,
+		IndexPrefix: cfg.ES.IndexPrefix,
+	})
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create Elasticsearch client")
-	}
-	log.Info().Msg("Elasticsearch client created")
-
-	// ── CRITICAL: Ensure ES index has correct mapping ──
-	// The index MUST be created with "keyword" mapping for server_id, server_name,
-	// status fields BEFORE any documents are bulk-indexed. Otherwise, dynamic mapping
-	// will map them as "text" which breaks terms aggregation in report-service.
-	if err := database.EnsureIndexMapping(context.Background(), esClient, cfg.ES.IndexName); err != nil {
-		log.Fatal().Err(err).Msg("Failed to ensure Elasticsearch index mapping")
+		log.Fatal().Err(err).Msg("Failed to connect to Elasticsearch")
 	}
 
-	// 6. Connect Kafka
-	brokers := strings.Split(cfg.Kafka.Brokers, ",")
-
-	producer := kafka.NewSegmentioProducer(
-		kafka.DefaultSegmentioProducerConfig(brokers),
-		log,
-	)
-	defer producer.Close()
-
-	consumer := kafka.NewSegmentioConsumer(
-		kafka.DefaultSegmentioConsumerConfig(brokers, "monitor-group"),
-		log,
-	)
-	defer consumer.Close()
-
-	// 7. Init repos
-	configRepo := repository.NewConfigRepo(monitorDB)
-	serverReader := repository.NewServerReader(serverDB)
-	esRepo := repository.NewESStatusLogRepo(esClient, cfg.ES.IndexName)
-
-	// 8. Init checker (TCP only — no factory needed)
-	healthChecker := checker.NewTCPChecker(
-		time.Duration(cfg.Monitor.TCPTimeout)*time.Millisecond,
-		cfg.Monitor.TCPDialHost,
-	)
-
-	// 9. Init worker pool
-	pool := worker.NewPool(cfg.Monitor.WorkerCount, healthChecker, log)
-
-	// 10. Init scheduler
-	checkScheduler := scheduler.NewHealthCheckScheduler(
-		pool,
-		serverReader,
-		configRepo,
-		esRepo,
-		redisClient,
-		producer,
-		log,
-		time.Duration(cfg.Monitor.CheckInterval)*time.Second,
-	)
-
-	// 11. Init event consumer
-	eventConsumer := service.NewEventConsumer(configRepo, cfg.Monitor, log)
-	if err := consumer.Subscribe("server.created", "monitor-group", eventConsumer.HandleServerCreated); err != nil {
-		log.Fatal().Err(err).Msg("Failed to subscribe to server.created")
+	templateCtx, cancelTemplate := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := database.EnsureIndexTemplate(templateCtx, esClient, cfg.ES.IndexPrefix); err != nil {
+		log.Fatal().Err(err).Msg("Failed to install the health-fact index template")
 	}
-	if err := consumer.Subscribe("server.deleted", "monitor-group", eventConsumer.HandleServerDeleted); err != nil {
-		log.Fatal().Err(err).Msg("Failed to subscribe to server.deleted")
-	}
+	cancelTemplate()
 
-	// 12. Create root context
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ops := monitor.NewRedisOps(rdb)
+	writer := repository.NewFactWriter(esClient, cfg.ES.IndexPrefix)
+	facts := monitor.NewFactBuffer(writer, cfg.Monitor.FactCapacity, log)
+	pinger := monitor.NewTCPPinger(
+		time.Duration(cfg.Monitor.TCPTimeout)*time.Millisecond, cfg.Monitor.TCPDialHost)
 
-	// 13. Start scheduler in goroutine
-	go checkScheduler.Start(ctx)
+	scheduler := monitor.NewScheduler(ops, log)
+	pool := monitor.NewPool(ops, pinger, facts, cfg.Monitor.WorkerCount, log)
 
-	// 14. Start Kafka consumer in goroutine (track with WaitGroup)
-	var consumerWg sync.WaitGroup
-	consumerWg.Add(1)
-	go func() {
-		defer consumerWg.Done()
-		if err := consumer.Start(ctx); err != nil && err != context.Canceled {
-			log.Error().Err(err).Msg("Kafka consumer stopped with error")
-		}
-	}()
+	// The scheduler competes for the round lock; the pool pings whether or not
+	// this instance wins, so every instance adds ping capacity.
+	runCtx, stopRun := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); scheduler.Run(runCtx) }()
+	go func() { defer wg.Done(); pool.Run(runCtx) }()
+	go func() { defer wg.Done(); facts.Run(runCtx) }()
 
-	// 15. HTTP server (health endpoint)
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
 	r.Use(gin.Recovery())
-	r.Use(middleware.RequestIDMiddleware())
-	r.Use(middleware.LoggerMiddleware(log))
-
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"service": "monitor-service",
-		})
-	})
-	r.GET("/api/v1/monitor/status", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":          "ok",
-			"service":         "monitor-service",
-			"check_interval":  cfg.Monitor.CheckInterval,
-			"worker_count":    cfg.Monitor.WorkerCount,
-			"tcp_timeout_ms":  cfg.Monitor.TCPTimeout,
-			"elasticsearch":   cfg.ES.Addresses,
-			"index":           cfg.ES.IndexName,
-			"redis_available": rdb != nil,
-		})
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
 	addr := fmt.Sprintf(":%s", cfg.App.Port)
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: r,
-	}
-
+	srv := &http.Server{Addr: addr, Handler: r}
 	go func() {
-		log.Info().Str("addr", addr).Msg("HTTP server started")
+		log.Info().Str("addr", addr).Int("workers", cfg.Monitor.WorkerCount).
+			Msg("Starting monitor service")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal().Err(err).Msg("HTTP server failed")
+			log.Fatal().Err(err).Msg("Failed to start health endpoint")
 		}
 	}()
 
-	// 16. Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	log.Info().Msg("Shutting down monitor service...")
 
-	log.Info().Msg("Shutting down monitor-service...")
-
-	// 1. Cancel root context — stops scheduler and consumer loops
-	cancel()
-
-	// 2. Wait for consumer goroutine to cleanly exit
-	consumerWg.Wait()
-
-	// 3. Close consumer (closes all Kafka readers)
-	if err := consumer.Close(); err != nil {
-		log.Error().Err(err).Msg("Consumer close error")
-	}
-
-	// 4. Close Kafka producer
-	if err := producer.Close(); err != nil {
-		log.Error().Err(err).Msg("Producer close error")
-	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Error().Err(err).Msg("HTTP server shutdown error")
+		log.Error().Err(err).Msg("Health endpoint forced to shutdown")
 	}
 
-	log.Info().Msg("Monitor-service stopped")
+	stopRun()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		log.Warn().Msg("Monitor loops did not stop in time")
+	}
+
+	log.Info().Msg("Monitor service exited")
 }

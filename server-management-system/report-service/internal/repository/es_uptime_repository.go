@@ -5,240 +5,135 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"sort"
+	"strings"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/vcs-sms/report-service/internal/dto"
 )
 
-// UptimeCalculator defines the interface for computing uptime from Elasticsearch.
-type UptimeCalculator interface {
-	// GetUptimeSummary calculates average uptime for the given date range.
-	GetUptimeSummary(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error)
+const aggPageSize = 1000
 
-	// GetLowUptimeServers returns the top N servers with lowest uptime.
-	GetLowUptimeServers(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error)
+// ServerFacts is one server's measured health for a day.
+type ServerFacts struct {
+	ServerID     string
+	ServerName   string
+	OnChecks     int
+	ActualChecks int
+	LastStatus   string
 }
 
-type esUptimeRepo struct {
-	client *elasticsearch.Client
-	index  string
+// UptimeAggregator reads measured facts out of Elasticsearch. Only the
+// snapshot job calls it, once a day.
+type UptimeAggregator interface {
+	// AggregateDay returns facts keyed by server_id for [start, end).
+	AggregateDay(ctx context.Context, start, end time.Time) (map[string]ServerFacts, error)
 }
 
-// NewESUptimeRepo creates a new Elasticsearch uptime repository.
-func NewESUptimeRepo(client *elasticsearch.Client, index string) UptimeCalculator {
-	return &esUptimeRepo{client: client, index: index}
+type esUptimeAggregator struct {
+	client      *elasticsearch.Client
+	indexPrefix string
 }
 
-// GetUptimeSummary calculates average uptime for the given date range using ES aggregations.
-func (r *esUptimeRepo) GetUptimeSummary(ctx context.Context, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-	query := map[string]interface{}{
-		"size": 0,
-		"query": map[string]interface{}{
-			"bool": map[string]interface{}{
-				"filter": []interface{}{
-					map[string]interface{}{
-						"range": map[string]interface{}{
-							"checked_at": map[string]interface{}{
-								"gte": startDate.Format(time.RFC3339),
-								"lt":  endDate.Format(time.RFC3339),
-							},
-						},
-					},
-				},
-			},
-		},
-		"aggs": map[string]interface{}{
-			"per_server": map[string]interface{}{
-				"terms": map[string]interface{}{
-					"field": "server_id",
-					"size":  10000,
-				},
-				"aggs": map[string]interface{}{
-					"total_checks": map[string]interface{}{
-						"value_count": map[string]interface{}{
-							"field": "status",
-						},
-					},
-					"on_checks": map[string]interface{}{
-						"filter": map[string]interface{}{
-							"term": map[string]interface{}{
-								"status": "on",
-							},
-						},
-					},
-					"latest_check": map[string]interface{}{
-						"top_hits": map[string]interface{}{
-							"size": 1,
-							"sort": []interface{}{
-								map[string]interface{}{
-									"checked_at": map[string]interface{}{
-										"order": "desc",
-									},
-								},
-							},
-							"_source": map[string]interface{}{
-								"includes": []string{"status", "server_name"},
-							},
-						},
-					},
-					"uptime_rate": map[string]interface{}{
-						"bucket_script": map[string]interface{}{
-							"buckets_path": map[string]interface{}{
-								"on":    "on_checks._count",
-								"total": "total_checks",
-							},
-							"script": "params.on / params.total * 100",
-						},
-					},
-				},
-			},
-			"avg_uptime": map[string]interface{}{
-				"avg_bucket": map[string]interface{}{
-					"buckets_path": "per_server>uptime_rate",
-				},
-			},
-		},
-	}
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(query); err != nil {
-		return nil, fmt.Errorf("failed to encode ES query: %w", err)
-	}
-
-	res, err := r.client.Search(
-		r.client.Search.WithContext(ctx),
-		r.client.Search.WithIndex(r.index),
-		r.client.Search.WithBody(&buf),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("ES search failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	if res.IsError() {
-		return nil, fmt.Errorf("ES search returned error: %s", res.String())
-	}
-
-	return r.parseSummaryBody(res.Body, startDate, endDate)
+// NewUptimeAggregator creates an Elasticsearch-backed UptimeAggregator.
+func NewUptimeAggregator(client *elasticsearch.Client, indexPrefix string) UptimeAggregator {
+	return &esUptimeAggregator{client: client, indexPrefix: indexPrefix}
 }
 
-// parseSummaryBody parses the ES aggregation response body into a ReportSummaryResponse.
-func (r *esUptimeRepo) parseSummaryBody(body io.Reader, startDate, endDate time.Time) (*dto.ReportSummaryResponse, error) {
-	var result struct {
-		Aggregations struct {
-			PerServer struct {
-				Buckets []struct {
-					Key         string `json:"key"`
-					DocCount    int64  `json:"doc_count"`
-					TotalChecks struct {
-						Value float64 `json:"value"`
-					} `json:"total_checks"`
-					OnChecks struct {
-						DocCount int64 `json:"doc_count"`
-					} `json:"on_checks"`
-					LatestCheck struct {
-						Hits struct {
-							Hits []struct {
-								Source struct {
-									Status     string `json:"status"`
-									ServerName string `json:"server_name"`
-								} `json:"_source"`
-							} `json:"hits"`
+// aggResponse is the slice of the ES reply the job needs.
+type aggResponse struct {
+	Aggregations struct {
+		ByServer struct {
+			AfterKey map[string]any `json:"after_key"`
+			Buckets  []struct {
+				Key      map[string]string `json:"key"`
+				DocCount int               `json:"doc_count"`
+				OnChecks struct {
+					DocCount int `json:"doc_count"`
+				} `json:"on_checks"`
+				LastFact struct {
+					Hits struct {
+						Hits []struct {
+							Source struct {
+								ServerName string `json:"server_name"`
+								Status     string `json:"status"`
+							} `json:"_source"`
 						} `json:"hits"`
-					} `json:"latest_check"`
-					UptimeRate struct {
-						Value float64 `json:"value"`
-					} `json:"uptime_rate"`
-				} `json:"buckets"`
-			} `json:"per_server"`
-			AvgUptime struct {
-				Value float64 `json:"value"`
-			} `json:"avg_uptime"`
-		} `json:"aggregations"`
-	}
+					} `json:"hits"`
+				} `json:"last_fact"`
+			} `json:"buckets"`
+		} `json:"by_server"`
+	} `json:"aggregations"`
+}
 
-	if err := json.NewDecoder(body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to parse ES response: %w", err)
-	}
+// AggregateDay pages a composite aggregation. A terms agg cannot paginate over
+// 10.000 buckets; composite can, via after_key.
+func (a *esUptimeAggregator) AggregateDay(ctx context.Context, start, end time.Time) (map[string]ServerFacts, error) {
+	out := make(map[string]ServerFacts)
+	var after map[string]any
 
-	buckets := result.Aggregations.PerServer.Buckets
-	serversOn := 0
-	serversOff := 0
-	var totalChecks int64
+	for {
+		body, err := a.search(ctx, start, end, after)
+		if err != nil {
+			return nil, err
+		}
 
-	for _, b := range buckets {
-		totalChecks += int64(b.TotalChecks.Value)
-		// Determine current status from latest check
-		if len(b.LatestCheck.Hits.Hits) > 0 {
-			if b.LatestCheck.Hits.Hits[0].Source.Status == "on" {
-				serversOn++
-			} else {
-				serversOff++
+		for _, b := range body.Aggregations.ByServer.Buckets {
+			serverID := b.Key["server_id"]
+			facts := ServerFacts{
+				ServerID:     serverID,
+				OnChecks:     b.OnChecks.DocCount,
+				ActualChecks: b.DocCount,
 			}
+			// top_hits sorted checked_at desc gives the day's last fact, which
+			// carries both the name at that moment and the closing status.
+			if hits := b.LastFact.Hits.Hits; len(hits) > 0 {
+				facts.ServerName = hits[0].Source.ServerName
+				facts.LastStatus = hits[0].Source.Status
+			}
+			out[serverID] = facts
+		}
+
+		after = body.Aggregations.ByServer.AfterKey
+		if len(after) == 0 {
+			return out, nil
 		}
 	}
-
-	reportEndDate := endDate.AddDate(0, 0, -1)
-
-	return &dto.ReportSummaryResponse{
-		StartDate:    startDate.Format("2006-01-02"),
-		EndDate:      reportEndDate.Format("2006-01-02"),
-		TotalServers: len(buckets),
-		ServersOn:    serversOn,
-		ServersOff:   serversOff,
-		AvgUptimePct: result.Aggregations.AvgUptime.Value,
-		TotalChecks:  totalChecks,
-	}, nil
 }
 
-// GetLowUptimeServers returns the top N servers with lowest uptime.
-func (r *esUptimeRepo) GetLowUptimeServers(ctx context.Context, startDate, endDate time.Time, topN int) ([]dto.ServerUptime, error) {
-	// Use same aggregation but collect all server uptimes
-	query := map[string]interface{}{
+func (a *esUptimeAggregator) search(ctx context.Context, start, end time.Time, after map[string]any) (*aggResponse, error) {
+	composite := map[string]any{
+		"size": aggPageSize,
+		"sources": []any{
+			map[string]any{"server_id": map[string]any{"terms": map[string]any{"field": "server_id"}}},
+		},
+	}
+	if len(after) > 0 {
+		composite["after"] = after
+	}
+
+	query := map[string]any{
 		"size": 0,
-		"query": map[string]interface{}{
-			"bool": map[string]interface{}{
-				"filter": []interface{}{
-					map[string]interface{}{
-						"range": map[string]interface{}{
-							"checked_at": map[string]interface{}{
-								"gte": startDate.Format(time.RFC3339),
-								"lt":  endDate.Format(time.RFC3339),
-							},
-						},
-					},
+		"query": map[string]any{
+			"range": map[string]any{
+				"checked_at": map[string]any{
+					"gte": start.UTC().Format(time.RFC3339),
+					"lt":  end.UTC().Format(time.RFC3339),
 				},
 			},
 		},
-		"aggs": map[string]interface{}{
-			"per_server": map[string]interface{}{
-				"terms": map[string]interface{}{
-					"field": "server_id",
-					"size":  10000,
-				},
-				"aggs": map[string]interface{}{
-					"total_checks": map[string]interface{}{
-						"value_count": map[string]interface{}{
-							"field": "status",
+		"aggs": map[string]any{
+			"by_server": map[string]any{
+				"composite": composite,
+				"aggs": map[string]any{
+					"last_fact": map[string]any{
+						"top_hits": map[string]any{
+							"size":    1,
+							"_source": []string{"server_name", "status"},
+							"sort":    []any{map[string]any{"checked_at": "desc"}},
 						},
 					},
-					"on_checks": map[string]interface{}{
-						"filter": map[string]interface{}{
-							"term": map[string]interface{}{
-								"status": "on",
-							},
-						},
-					},
-					"server_name": map[string]interface{}{
-						"top_hits": map[string]interface{}{
-							"size": 1,
-							"_source": map[string]interface{}{
-								"includes": []string{"server_name"},
-							},
-						},
+					"on_checks": map[string]any{
+						"filter": map[string]any{"term": map[string]any{"status": "ON"}},
 					},
 				},
 			},
@@ -247,88 +142,43 @@ func (r *esUptimeRepo) GetLowUptimeServers(ctx context.Context, startDate, endDa
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(query); err != nil {
-		return nil, fmt.Errorf("failed to encode ES query: %w", err)
+		return nil, fmt.Errorf("failed to encode aggregation: %w", err)
 	}
 
-	res, err := r.client.Search(
-		r.client.Search.WithContext(ctx),
-		r.client.Search.WithIndex(r.index),
-		r.client.Search.WithBody(&buf),
+	res, err := a.client.Search(
+		a.client.Search.WithContext(ctx),
+		a.client.Search.WithIndex(IndexPattern(a.indexPrefix, start, end)),
+		a.client.Search.WithBody(&buf),
+		// A window may touch a day whose index ILM already deleted.
+		a.client.Search.WithIgnoreUnavailable(true),
+		a.client.Search.WithAllowNoIndices(true),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("ES search failed: %w", err)
+		return nil, fmt.Errorf("aggregation request failed: %w", err)
 	}
 	defer res.Body.Close()
 
 	if res.IsError() {
-		return nil, fmt.Errorf("ES search returned error: %s", res.String())
+		return nil, fmt.Errorf("aggregation returned %s", res.Status())
 	}
 
-	return r.parseLowUptimeBody(res.Body, topN)
+	var body aggResponse
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("failed to decode aggregation: %w", err)
+	}
+	return &body, nil
 }
 
-// parseLowUptimeBody parses the ES response body and returns top N lowest uptime servers.
-func (r *esUptimeRepo) parseLowUptimeBody(body io.Reader, topN int) ([]dto.ServerUptime, error) {
-	var result struct {
-		Aggregations struct {
-			PerServer struct {
-				Buckets []struct {
-					Key         string `json:"key"`
-					TotalChecks struct {
-						Value float64 `json:"value"`
-					} `json:"total_checks"`
-					OnChecks struct {
-						DocCount int64 `json:"doc_count"`
-					} `json:"on_checks"`
-					ServerName struct {
-						Hits struct {
-							Hits []struct {
-								Source struct {
-									ServerName string `json:"server_name"`
-								} `json:"_source"`
-							} `json:"hits"`
-						} `json:"hits"`
-					} `json:"server_name"`
-				} `json:"buckets"`
-			} `json:"per_server"`
-		} `json:"aggregations"`
+// IndexPattern names the daily indices a window touches, rather than fanning
+// the search out over every index ever written.
+func IndexPattern(prefix string, start, end time.Time) string {
+	var names []string
+	day := time.Date(start.UTC().Year(), start.UTC().Month(), start.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	for ; day.Before(end.UTC()); day = day.AddDate(0, 0, 1) {
+		names = append(names, fmt.Sprintf("%s-%s", prefix, day.Format("2006.01.02")))
 	}
-
-	if err := json.NewDecoder(body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to parse ES response: %w", err)
+	if len(names) == 0 {
+		names = append(names, fmt.Sprintf("%s-%s", prefix, start.UTC().Format("2006.01.02")))
 	}
-
-	var servers []dto.ServerUptime
-	for _, b := range result.Aggregations.PerServer.Buckets {
-		serverName := ""
-		if len(b.ServerName.Hits.Hits) > 0 {
-			serverName = b.ServerName.Hits.Hits[0].Source.ServerName
-		}
-
-		totalChecks := int64(b.TotalChecks.Value)
-		uptimePct := 0.0
-		if totalChecks > 0 {
-			uptimePct = float64(b.OnChecks.DocCount) / float64(totalChecks) * 100.0
-		}
-
-		servers = append(servers, dto.ServerUptime{
-			ServerID:    b.Key,
-			ServerName:  serverName,
-			UptimePct:   uptimePct,
-			TotalChecks: totalChecks,
-			OnChecks:    b.OnChecks.DocCount,
-		})
-	}
-
-	// Sort by uptime ascending
-	sort.Slice(servers, func(i, j int) bool {
-		return servers[i].UptimePct < servers[j].UptimePct
-	})
-
-	// Return top N
-	if len(servers) > topN {
-		servers = servers[:topN]
-	}
-
-	return servers, nil
+	return strings.Join(names, ",")
 }
