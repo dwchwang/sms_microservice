@@ -141,12 +141,12 @@ func TestServerRepository_FindAll_FilterByIDNameAndIPv4(t *testing.T) {
 	rows := sqlmock.NewRows([]string{"id", "server_id", "server_name", "status", "ipv4", "os", "cpu_cores", "ram_gb", "disk_gb", "location", "description", "created_at", "updated_at", "deleted_at"}).
 		AddRow(uuid.New(), "SRV-WEB-001", "web-01", "on", "10.0.0.1", "", nil, nil, nil, "", "", nil, nil, nil)
 
-	countQuery := `SELECT count(*) FROM "servers" WHERE server_id ILIKE $1 AND server_name ILIKE $2 AND ipv4 LIKE $3 AND "servers"."deleted_at" IS NULL`
+	countQuery := `SELECT count(*) FROM "servers" WHERE server_id ILIKE $1 AND server_name ILIKE $2 AND host(ipv4) LIKE $3 AND "servers"."deleted_at" IS NULL`
 	mock.ExpectQuery(regexp.QuoteMeta(countQuery)).
 		WithArgs("%SRV-WEB%", "%web%", "10.0.%").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
-	dataQuery := `SELECT * FROM "servers" WHERE server_id ILIKE $1 AND server_name ILIKE $2 AND ipv4 LIKE $3 AND "servers"."deleted_at" IS NULL ORDER BY server_id ASC LIMIT $4`
+	dataQuery := `SELECT * FROM "servers" WHERE server_id ILIKE $1 AND server_name ILIKE $2 AND host(ipv4) LIKE $3 AND "servers"."deleted_at" IS NULL ORDER BY server_id ASC LIMIT $4`
 	mock.ExpectQuery(regexp.QuoteMeta(dataQuery)).
 		WithArgs("%SRV-WEB%", "%web%", "10.0.%", 20).
 		WillReturnRows(rows)
@@ -178,12 +178,12 @@ func TestServerRepository_FindAll_AllFiltersAndPaginationBounds(t *testing.T) {
 	rows := sqlmock.NewRows([]string{"id", "server_id", "server_name", "status", "ipv4", "os", "cpu_cores", "ram_gb", "disk_gb", "location", "description", "created_at", "updated_at", "deleted_at"}).
 		AddRow(uuid.New(), "SRV-001", "web-01", "on", "10.0.0.1", "Ubuntu", nil, nil, nil, "HN", "", nil, nil, nil)
 
-	countQuery := `SELECT count(*) FROM "servers" WHERE status = $1 AND server_id ILIKE $2 AND server_name ILIKE $3 AND ipv4 LIKE $4 AND os ILIKE $5 AND location ILIKE $6 AND "servers"."deleted_at" IS NULL`
+	countQuery := `SELECT count(*) FROM "servers" WHERE status = $1 AND server_id ILIKE $2 AND server_name ILIKE $3 AND host(ipv4) LIKE $4 AND os ILIKE $5 AND location ILIKE $6 AND "servers"."deleted_at" IS NULL`
 	mock.ExpectQuery(regexp.QuoteMeta(countQuery)).
 		WithArgs("on", "%SRV%", "%web%", "10.0.%", "%Ubuntu%", "%HN%").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 
-	dataQuery := `SELECT * FROM "servers" WHERE status = $1 AND server_id ILIKE $2 AND server_name ILIKE $3 AND ipv4 LIKE $4 AND os ILIKE $5 AND location ILIKE $6 AND "servers"."deleted_at" IS NULL ORDER BY updated_at DESC LIMIT $7`
+	dataQuery := `SELECT * FROM "servers" WHERE status = $1 AND server_id ILIKE $2 AND server_name ILIKE $3 AND host(ipv4) LIKE $4 AND os ILIKE $5 AND location ILIKE $6 AND "servers"."deleted_at" IS NULL ORDER BY updated_at DESC LIMIT $7`
 	mock.ExpectQuery(regexp.QuoteMeta(dataQuery)).
 		WithArgs("on", "%SRV%", "%web%", "10.0.%", "%Ubuntu%", "%HN%", 100).
 		WillReturnRows(rows)

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
+import { Fragment, Suspense, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -250,8 +250,8 @@ function ServersView() {
           <TableHeader>
             <TableRow>
               {SORTABLE.map(([col, label]) => (
+                <Fragment key={col}>
                 <TableHead
-                  key={col}
                   role="button"
                   tabIndex={0}
                   title={`Sắp xếp theo ${label}`}
@@ -286,6 +286,12 @@ function ServersView() {
                     </span>
                   </div>
                 </TableHead>
+                {col === "ipv4" ? (
+                  <TableHead>
+                    <span className="flex h-9 items-center whitespace-nowrap">Port</span>
+                  </TableHead>
+                ) : null}
+                </Fragment>
               ))}
               <TableHead className="text-right">Thao tác</TableHead>
             </TableRow>
@@ -294,7 +300,7 @@ function ServersView() {
             {isLoading ? (
               Array.from({ length: 8 }).map((_, i) => (
                 <TableRow key={i}>
-                  {Array.from({ length: 8 }).map((__, j) => (
+                  {Array.from({ length: 9 }).map((__, j) => (
                     <TableCell key={j}>
                       <Skeleton className="h-4 w-full" />
                     </TableCell>
@@ -309,9 +315,8 @@ function ServersView() {
                   <TableCell>
                     <StatusPill status={s.status} />
                   </TableCell>
-                  <TableCell className="font-mono">
-                    {s.ipv4}:{s.tcp_port}
-                  </TableCell>
+                  <TableCell className="font-mono">{s.ipv4}</TableCell>
+                  <TableCell className="font-mono text-mute">{s.tcp_port}</TableCell>
                   <TableCell>{orDash(s.location)}</TableCell>
                   <TableCell className="text-mute">{formatDateTime(s.created_at)}</TableCell>
                   <TableCell className="text-mute">{formatDateTime(s.updated_at)}</TableCell>
@@ -344,7 +349,7 @@ function ServersView() {
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={8} className="p-0">
+                <TableCell colSpan={9} className="p-0">
                   <EmptyState
                     title={isError ? "Không tải được dữ liệu" : "Không có server"}
                     description={

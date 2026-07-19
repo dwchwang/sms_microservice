@@ -107,7 +107,8 @@ func (r *serverRepository) FindAll(ctx context.Context, filter *dto.ServerFilter
 		query = query.Where("server_name ILIKE ?", "%"+filter.ServerName+"%")
 	}
 	if filter.IPv4 != "" {
-		query = query.Where("ipv4 LIKE ?", filter.IPv4+"%")
+		// ipv4 is an inet column; LIKE needs a text form. host() drops any netmask.
+		query = query.Where("host(ipv4) LIKE ?", filter.IPv4+"%")
 	}
 	if filter.OS != "" {
 		query = query.Where("os ILIKE ?", "%"+filter.OS+"%")
@@ -225,6 +226,29 @@ func (r *serverRepository) FindExistingNames(ctx context.Context, names []string
 
 const insertColumns = `(server_id, server_name, ipv4, tcp_port, os, cpu_cores, ram_gb, disk_gb, location, description, status)`
 
+// server_id is globally unique (including soft-deleted rows), so an import cannot
+// insert a second row for a known id. On conflict a soft-deleted row is revived
+// with the imported values; an active row is left untouched — the WHERE makes it
+// absent from RETURNING, i.e. reported as a duplicate.
+const onConflictResurrect = `ON CONFLICT (server_id) DO UPDATE SET
+	server_name = EXCLUDED.server_name,
+	ipv4 = EXCLUDED.ipv4,
+	tcp_port = EXCLUDED.tcp_port,
+	os = EXCLUDED.os,
+	cpu_cores = EXCLUDED.cpu_cores,
+	ram_gb = EXCLUDED.ram_gb,
+	disk_gb = EXCLUDED.disk_gb,
+	location = EXCLUDED.location,
+	description = EXCLUDED.description,
+	status = EXCLUDED.status,
+	status_version = 0,
+	status_changed_at = NULL,
+	last_status_event_id = NULL,
+	deleted_at = NULL,
+	updated_at = now()
+WHERE servers.deleted_at IS NOT NULL
+RETURNING server_id`
+
 // insertArgs flattens one server into bind parameters. Zero-valued optional
 // numbers become NULL, since the table only allows NULL or a positive value.
 func insertArgs(s model.Server) []any {
@@ -256,8 +280,8 @@ func (r *serverRepository) InsertBatch(ctx context.Context, servers []model.Serv
 	}
 
 	query := fmt.Sprintf(
-		`INSERT INTO servers %s VALUES %s ON CONFLICT (server_id) DO NOTHING RETURNING server_id`,
-		insertColumns, strings.Join(placeholders, ","),
+		`INSERT INTO servers %s VALUES %s %s`,
+		insertColumns, strings.Join(placeholders, ","), onConflictResurrect,
 	)
 
 	var inserted []string
@@ -266,12 +290,12 @@ func (r *serverRepository) InsertBatch(ctx context.Context, servers []model.Serv
 }
 
 // InsertOne inserts a single server, used to retry a batch that hit a name clash.
-// Returns gorm.ErrRecordNotFound when the server_id already exists.
+// Returns gorm.ErrRecordNotFound when the server_id belongs to an active server
+// (a soft-deleted one is revived instead).
 func (r *serverRepository) InsertOne(ctx context.Context, server *model.Server) error {
 	query := fmt.Sprintf(
-		`INSERT INTO servers %s VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		 ON CONFLICT (server_id) DO NOTHING RETURNING server_id`,
-		insertColumns,
+		`INSERT INTO servers %s VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) %s`,
+		insertColumns, onConflictResurrect,
 	)
 
 	var inserted []string

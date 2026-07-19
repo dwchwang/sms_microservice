@@ -84,7 +84,7 @@ services:
       - SIMULATOR_BASE_PORT=9001
       - SIMULATOR_NUM_SERVERS=10000
       - SIMULATOR_TICK_INTERVAL=30s
-      - SIMULATOR_DEFAULT_UPTIME_RATE=0.95
+      - SIMULATOR_DEFAULT_UPTIME_RATE=0.75
     deploy:
       resources:
         limits:

@@ -28,16 +28,17 @@ type UpdateServerRequest struct {
 	Description *string `json:"description,omitempty"`
 }
 
-// ServerFilter holds query parameters for listing servers.
+// ServerFilter holds query parameters for listing servers. The json tags let the
+// export handler bind the same filter from a POST body, not just the query string.
 type ServerFilter struct {
-	Status     string `form:"status"`
-	ServerID   string `form:"server_id"`
-	ServerName string `form:"server_name"`
-	IPv4       string `form:"ipv4"`
-	OS         string `form:"os"`
-	Location   string `form:"location"`
-	SortBy     string `form:"sort_by"`
-	SortOrder  string `form:"sort_order"`
-	Page       int    `form:"page"`
-	PageSize   int    `form:"page_size"`
+	Status     string `form:"status" json:"status"`
+	ServerID   string `form:"server_id" json:"server_id"`
+	ServerName string `form:"server_name" json:"server_name"`
+	IPv4       string `form:"ipv4" json:"ipv4"`
+	OS         string `form:"os" json:"os"`
+	Location   string `form:"location" json:"location"`
+	SortBy     string `form:"sort_by" json:"sort_by"`
+	SortOrder  string `form:"sort_order" json:"sort_order"`
+	Page       int    `form:"page" json:"page"`
+	PageSize   int    `form:"page_size" json:"page_size"`
 }
