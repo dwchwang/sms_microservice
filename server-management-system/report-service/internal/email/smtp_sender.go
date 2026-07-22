@@ -3,6 +3,7 @@ package email
 import (
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,11 +22,20 @@ var ErrAmbiguousDelivery = errors.New("delivery outcome unknown")
 // which is what stops the service being used as a mail relay.
 var ErrRecipientNotAllowed = errors.New("recipient domain is not allowed")
 
+// Attachment is a file attached to a report email.
+type Attachment struct {
+	Filename    string
+	ContentType string
+	Content     []byte
+}
+
 // Message is one outgoing report email.
 type Message struct {
 	To      string
 	Subject string
 	HTML    string
+	// Attachment is optional; when nil the message stays single-part.
+	Attachment *Attachment
 }
 
 // Sender delivers report emails.
@@ -178,9 +188,57 @@ func (s *GmailSender) compose(msg Message, messageID string) string {
 	b.WriteString("Message-ID: " + messageID + "\r\n")
 	b.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
+
+	if msg.Attachment == nil {
+		b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+		b.WriteString("\r\n")
+		b.WriteString(msg.HTML)
+		return b.String()
+	}
+
+	boundary := newBoundary()
+	b.WriteString("Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n")
+	b.WriteString("\r\n")
+
+	// HTML body part.
+	b.WriteString("--" + boundary + "\r\n")
 	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
 	b.WriteString("\r\n")
 	b.WriteString(msg.HTML)
+	b.WriteString("\r\n")
+
+	// Attachment part, base64 with the RFC 2045 line length.
+	att := msg.Attachment
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Type: " + att.ContentType + "; name=\"" + att.Filename + "\"\r\n")
+	b.WriteString("Content-Transfer-Encoding: base64\r\n")
+	b.WriteString("Content-Disposition: attachment; filename=\"" + att.Filename + "\"\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(wrapBase64(att.Content))
+	b.WriteString("\r\n")
+
+	b.WriteString("--" + boundary + "--\r\n")
+	return b.String()
+}
+
+// newBoundary returns a random MIME multipart boundary.
+func newBoundary() string {
+	buf := make([]byte, 16)
+	_, _ = rand.Read(buf)
+	return "vcs-boundary-" + hex.EncodeToString(buf)
+}
+
+// wrapBase64 encodes data and wraps it at 76 characters per line.
+func wrapBase64(data []byte) string {
+	const lineLen = 76
+	enc := base64.StdEncoding.EncodeToString(data)
+	var b strings.Builder
+	for len(enc) > lineLen {
+		b.WriteString(enc[:lineLen])
+		b.WriteString("\r\n")
+		enc = enc[lineLen:]
+	}
+	b.WriteString(enc)
 	return b.String()
 }
 

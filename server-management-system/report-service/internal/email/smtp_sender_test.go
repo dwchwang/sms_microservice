@@ -1,7 +1,9 @@
 package email
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"net/smtp"
 	"strings"
@@ -266,6 +268,64 @@ func TestSend_HandlesFromWithDisplayName(t *testing.T) {
 	// The header keeps the display name; only the envelope is stripped.
 	if !strings.Contains(client.body.String(), "From: VCS-SMS <reports@vcs.com.vn>") {
 		t.Error("the From header should keep the display name")
+	}
+}
+
+// An attachment turns the message into multipart/mixed and rides along as
+// base64 that must decode back to the original bytes.
+func TestCompose_WithAttachment(t *testing.T) {
+	s, client := newTestSender("", "")
+	msg := testMessage()
+	payload := []byte("PK\x03\x04 fake-xlsx-bytes with =formula and \n newline")
+	msg.Attachment = &Attachment{
+		Filename:    "uptime_2026-07-17.xlsx",
+		ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		Content:     payload,
+	}
+
+	if _, err := s.Send(msg); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	body := client.body.String()
+	if !strings.Contains(body, "Content-Type: multipart/mixed; boundary=") {
+		t.Error("message is not multipart/mixed")
+	}
+	if !strings.Contains(body, "Content-Type: text/html; charset=UTF-8") {
+		t.Error("html part missing")
+	}
+	if !strings.Contains(body, `Content-Disposition: attachment; filename="uptime_2026-07-17.xlsx"`) {
+		t.Error("attachment disposition missing or wrong filename")
+	}
+
+	// The base64 blob after the attachment headers must decode to the payload.
+	marker := "Content-Transfer-Encoding: base64\r\n"
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		t.Fatal("no base64 attachment part")
+	}
+	rest := body[idx+len(marker):]
+	rest = strings.SplitN(rest, "\r\n\r\n", 2)[1]         // skip to blank line after headers
+	rest = strings.SplitN(rest, "\r\n--", 2)[0]           // stop at the closing boundary
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(rest, "\r\n", ""))
+	if err != nil {
+		t.Fatalf("attachment is not valid base64: %v", err)
+	}
+	if !bytes.Equal(decoded, payload) {
+		t.Errorf("decoded attachment = %q, want %q", decoded, payload)
+	}
+}
+
+// Without an attachment the message stays a single text/html part.
+func TestCompose_NoAttachmentStaysSinglePart(t *testing.T) {
+	s, client := newTestSender("", "")
+
+	if _, err := s.Send(testMessage()); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if strings.Contains(client.body.String(), "multipart") {
+		t.Error("a message with no attachment should not be multipart")
 	}
 }
 

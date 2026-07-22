@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/vcs-sms/report-service/internal/dto"
 	"github.com/vcs-sms/report-service/internal/email"
+	"github.com/vcs-sms/report-service/internal/excel"
 	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/repository"
 )
@@ -26,6 +27,7 @@ type sendService struct {
 	jobs     repository.JobRepository
 	sender   email.Sender
 	renderer email.Renderer
+	gen      excel.Generator
 	loc      *time.Location
 	log      zerolog.Logger
 }
@@ -36,12 +38,13 @@ func NewSendService(
 	jobs repository.JobRepository,
 	sender email.Sender,
 	renderer email.Renderer,
+	gen excel.Generator,
 	loc *time.Location,
 	log zerolog.Logger,
 ) SendService {
 	return &sendService{
 		reports: reports, jobs: jobs, sender: sender,
-		renderer: renderer, loc: loc, log: log,
+		renderer: renderer, gen: gen, loc: loc, log: log,
 	}
 }
 
@@ -88,9 +91,17 @@ func (s *sendService) Send(ctx context.Context, req dto.SendReportRequest, repor
 		s.log.Error().Err(err).Str("job_id", job.ID.String()).Msg("Failed to mark the job sending")
 	}
 
-	messageID, sendErr := s.sender.Send(email.Message{
-		To: req.RecipientEmail, Subject: subject, HTML: html,
-	})
+	msg := email.Message{To: req.RecipientEmail, Subject: subject, HTML: html}
+	// The attachment is supplementary: a failure to build it must not lose the
+	// report the body already carries.
+	if att, err := s.buildAttachment(ctx, start, end, summary); err != nil {
+		s.log.Warn().Err(err).Str("job_id", job.ID.String()).
+			Msg("Failed to build uptime attachment; sending without it")
+	} else {
+		msg.Attachment = att
+	}
+
+	messageID, sendErr := s.sender.Send(msg)
 
 	state := s.recordSend(ctx, job.ID, messageID, sendErr)
 
@@ -104,6 +115,23 @@ func (s *sendService) Send(ctx context.Context, req dto.SendReportRequest, repor
 		}
 	}
 	return resp, nil
+}
+
+// buildAttachment renders the per-server uptime xlsx for the window.
+func (s *sendService) buildAttachment(ctx context.Context, start, end time.Time, summary *dto.SummaryResponse) (*email.Attachment, error) {
+	rows, err := s.reports.ServerUptimeRows(ctx, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read uptime rows: %w", err)
+	}
+	buf, err := s.gen.Generate(rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate xlsx: %w", err)
+	}
+	return &email.Attachment{
+		Filename:    excel.Filename(summary.StartDate, summary.EndDate),
+		ContentType: excel.ContentType,
+		Content:     buf.Bytes(),
+	}, nil
 }
 
 // recordSend maps the send outcome onto a state and stores it.

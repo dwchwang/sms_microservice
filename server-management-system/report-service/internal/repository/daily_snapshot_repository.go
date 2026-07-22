@@ -29,6 +29,16 @@ type LowUptimeServer struct {
 	UptimePct  float64 `gorm:"column:uptime_pct" json:"uptime_pct"`
 }
 
+// ServerUptimeRow is one server's uptime over the window. UptimePct is nil for a
+// server the window has a snapshot for but no measured checks (no-data);
+// TotalChecks is that server's number of checks over the window.
+type ServerUptimeRow struct {
+	ServerID    string   `gorm:"column:server_id"`
+	ServerName  string   `gorm:"column:server_name"`
+	TotalChecks int64    `gorm:"column:total_checks"`
+	UptimePct   *float64 `gorm:"column:uptime_pct"`
+}
+
 // SnapshotRepository owns the daily_snapshots table.
 type SnapshotRepository interface {
 	Upsert(ctx context.Context, snapshots []model.DailySnapshot) error
@@ -37,6 +47,9 @@ type SnapshotRepository interface {
 	Totals(ctx context.Context, start, end time.Time) (*Totals, error)
 	CountByLastStatus(ctx context.Context, date time.Time) (map[string]int64, error)
 	LowestUptime(ctx context.Context, start, end time.Time, limit int) ([]LowUptimeServer, error)
+	// AllServerUptime returns every server the window has a snapshot for, ordered
+	// by server_id, with a nil uptime for no-data servers.
+	AllServerUptime(ctx context.Context, start, end time.Time) ([]ServerUptimeRow, error)
 }
 
 type snapshotRepository struct {
@@ -179,6 +192,36 @@ func (r *snapshotRepository) LowestUptime(ctx context.Context, start, end time.T
 	var out []LowUptimeServer
 	err := r.db.WithContext(ctx).
 		Raw(lowestUptimeQuery, start, end, start, end, limit).
+		Scan(&out).Error
+	return out, err
+}
+
+// Same per-server fold as the ranking, but keeps no-data (NULL uptime) rows and
+// returns everyone, so the attachment matches total_servers in the report body.
+const allServerUptimeQuery = `
+WITH per_server AS (
+	SELECT server_id,
+	       COALESCE(SUM(actual_checks), 0) AS total_checks,
+	       SUM(on_checks)::numeric / NULLIF(SUM(actual_checks), 0) * 100 AS uptime_pct
+	FROM daily_snapshots
+	WHERE date BETWEEN ? AND ?
+	GROUP BY server_id
+), latest_name AS (
+	SELECT DISTINCT ON (server_id) server_id, server_name
+	FROM daily_snapshots
+	WHERE date BETWEEN ? AND ?
+	ORDER BY server_id, date DESC
+)
+SELECT p.server_id, n.server_name, p.total_checks, p.uptime_pct
+FROM per_server p
+JOIN latest_name n USING (server_id)
+ORDER BY p.server_id ASC`
+
+// AllServerUptime returns the whole population with per-server uptime.
+func (r *snapshotRepository) AllServerUptime(ctx context.Context, start, end time.Time) ([]ServerUptimeRow, error) {
+	var out []ServerUptimeRow
+	err := r.db.WithContext(ctx).
+		Raw(allServerUptimeQuery, start, end, start, end).
 		Scan(&out).Error
 	return out, err
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/vcs-sms/report-service/internal/client"
 	"github.com/vcs-sms/report-service/internal/database"
 	"github.com/vcs-sms/report-service/internal/email"
+	"github.com/vcs-sms/report-service/internal/excel"
 	"github.com/vcs-sms/report-service/internal/handler"
 	"github.com/vcs-sms/report-service/internal/repository"
 	"github.com/vcs-sms/report-service/internal/scheduler"
@@ -63,7 +64,8 @@ func main() {
 
 	reportSvc := service.NewReportService(
 		snapshotRepo, loc, cfg.Report.MaxRangeDays, cfg.Report.CoverageThresholdPct)
-	sendSvc := service.NewSendService(reportSvc, jobRepo, sender, renderer, loc, log)
+	xlsxGen := excel.NewGenerator()
+	sendSvc := service.NewSendService(reportSvc, jobRepo, sender, renderer, xlsxGen, loc, log)
 	snapshotJob := snapshot.NewJob(serverClient, aggregator, snapshotRepo, loc, log)
 	reportHandler := handler.NewReportHandler(reportSvc, sendSvc)
 

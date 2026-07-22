@@ -23,10 +23,16 @@ type fakeSnapshots struct {
 	gotStart   time.Time
 	gotEnd     time.Time
 	gotLastDay time.Time
+	uptimeRows []repository.ServerUptimeRow
 	missingErr error
 	totalsErr  error
 	statusErr  error
 	topErr     error
+	uptimeErr  error
+}
+
+func (f *fakeSnapshots) AllServerUptime(ctx context.Context, start, end time.Time) ([]repository.ServerUptimeRow, error) {
+	return f.uptimeRows, f.uptimeErr
 }
 
 func (f *fakeSnapshots) MissingDates(ctx context.Context, start, end time.Time) ([]time.Time, error) {

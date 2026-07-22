@@ -36,6 +36,9 @@ type ReportService interface {
 	// Summary reports over [startDate, endDate], both inclusive whole days.
 	Summary(ctx context.Context, startDate, endDate string) (*dto.SummaryResponse, error)
 	ParseRange(startDate, endDate string, now time.Time) (time.Time, time.Time, error)
+	// ServerUptimeRows lists every server the window covers, with per-server
+	// uptime, for the email attachment.
+	ServerUptimeRows(ctx context.Context, start, end time.Time) ([]repository.ServerUptimeRow, error)
 }
 
 type reportService struct {
@@ -160,6 +163,13 @@ func (s *reportService) Summary(ctx context.Context, startDate, endDate string) 
 	resp.Degraded = resp.CoveragePct < s.coverageThreshold
 
 	return resp, nil
+}
+
+// ServerUptimeRows returns the window's whole population with per-server uptime.
+// The caller sends this only after Summary succeeds, so coverage is already
+// vetted; this is a plain read.
+func (s *reportService) ServerUptimeRows(ctx context.Context, start, end time.Time) ([]repository.ServerUptimeRow, error) {
+	return s.snapshots.AllServerUptime(ctx, start, end)
 }
 
 func startOfDay(t time.Time) time.Time {

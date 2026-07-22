@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/vcs-sms/report-service/internal/dto"
 	"github.com/vcs-sms/report-service/internal/email"
+	"github.com/vcs-sms/report-service/internal/excel"
 	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/repository"
 )
@@ -86,7 +88,7 @@ func newTestSendService(sendErr error) (SendService, *fakeJobs, *fakeSender) {
 	reports := newTestService(&fakeSnapshots{totals: sampleTotals()})
 	jobs := &fakeJobs{}
 	sender := &fakeSender{messageID: "<abc@vcs.com.vn>", err: sendErr}
-	svc := NewSendService(reports, jobs, sender, &fakeRenderer{}, loc, zerolog.New(io.Discard))
+	svc := NewSendService(reports, jobs, sender, &fakeRenderer{}, excel.NewGenerator(), loc, zerolog.New(io.Discard))
 	return svc, jobs, sender
 }
 
@@ -174,7 +176,9 @@ func TestSend_DisallowedRecipientIsReturnedAsError(t *testing.T) {
 func TestSend_InvalidRangeCreatesNoJob(t *testing.T) {
 	svc, jobs, _ := newTestSendService(nil)
 	bad := req()
-	bad.EndDate = "2026-07-17" // today
+	// Send validates against the real clock, so "today" must come from it too;
+	// a hardcoded date silently turns valid once that day passes.
+	bad.EndDate = time.Now().In(loc).Format(time.DateOnly)
 
 	_, err := svc.Send(context.Background(), bad, model.TypeOnDemand, "u1", "")
 
@@ -190,7 +194,7 @@ func TestSend_InvalidRangeCreatesNoJob(t *testing.T) {
 func TestSend_SummaryFailureMarksJobFailed(t *testing.T) {
 	reports := newTestService(&fakeSnapshots{totalsErr: errBoom})
 	jobs := &fakeJobs{}
-	svc := NewSendService(reports, jobs, &fakeSender{}, &fakeRenderer{}, loc, zerolog.New(io.Discard))
+	svc := NewSendService(reports, jobs, &fakeSender{}, &fakeRenderer{}, excel.NewGenerator(), loc, zerolog.New(io.Discard))
 
 	if _, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", ""); err == nil {
 		t.Fatal("expected an error")
@@ -207,7 +211,7 @@ func TestSend_SummaryFailureMarksJobFailed(t *testing.T) {
 func TestSend_RenderFailureMarksJobFailed(t *testing.T) {
 	reports := newTestService(&fakeSnapshots{totals: sampleTotals()})
 	jobs := &fakeJobs{}
-	svc := NewSendService(reports, jobs, &fakeSender{}, &fakeRenderer{err: errBoom}, loc, zerolog.New(io.Discard))
+	svc := NewSendService(reports, jobs, &fakeSender{}, &fakeRenderer{err: errBoom}, excel.NewGenerator(), loc, zerolog.New(io.Discard))
 
 	if _, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", ""); err == nil {
 		t.Fatal("expected an error")

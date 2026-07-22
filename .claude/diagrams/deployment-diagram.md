@@ -1,150 +1,224 @@
-# 🐳 Deployment Diagram — Docker Compose
+# 🚀 Sơ đồ triển khai — Docker Compose
 
-> **Ngày tạo:** 09/06/2026
-> **Mô tả:** Sơ đồ triển khai hệ thống VCS-SMS trên Docker.
+> Cập nhật: 21/07/2026 · Nguồn: `server-management-system/docker-compose.yml`
 
 ---
 
-## Docker Network Topology
+## 1. Toàn cảnh 10 container trên mạng `vcs-network`
 
 ```mermaid
 graph TB
-    subgraph "Docker Network: vcs-network (bridge)"
-        
-        subgraph "Infrastructure Layer"
-            PG[("🐘 PostgreSQL 17<br/>Container: vcs-sms-postgres<br/>Port: 5432<br/>Volume: postgres_data")]
-            REDIS[("⚡ Redis 8<br/>Container: vcs-sms-redis<br/>Port: 6379<br/>Volume: redis_data")]
-            ES[("🔍 Elasticsearch 8<br/>Container: vcs-sms-elasticsearch<br/>Port: 9200<br/>Volume: es_data")]
-            KAFKA[("📨 Kafka 3.9 (KRaft)<br/>Container: vcs-sms-kafka<br/>Port: 9092<br/>No Zookeeper!")]
-            KAFKA_INIT["🔧 Kafka Init<br/>Container: vcs-sms-kafka-init<br/>Tạo 7 topics, rồi exit"]
-        end
-
-        subgraph "Application Layer"
-            GW["🚪 API Gateway<br/>:8080 → host:8080<br/>Gin + JWT + RateLimit"]
-            AUTH["🔐 Auth Service<br/>:8081 → host:8081"]
-            SERVER["🖥️ Server Service<br/>:8082 → host:8082"]
-            MONITOR["📡 Monitor Service<br/>:8083 → host:8083"]
-            REPORT["📊 Report Service<br/>:8084 → host:8084"]
-            FILEIO["📁 File I/O Service<br/>:8085 → host:8085"]
-        end
-
-        subgraph "Simulator Layer"
-            TCPSIM["🎭 TCP Simulator<br/>:9001-19000 → host:9001-19000<br/>10.000 TCP Listeners"]
-        end
-
+    subgraph HOST["Máy host — cổng mở ra ngoài"]
+        P1["localhost:3000 → web"]
+        P2["localhost:8080 → traefik"]
+        P3["localhost:5432 → postgres"]
+        P4["localhost:6379 → redis"]
+        P5["localhost:9200 → elasticsearch"]
     end
 
-    Client["🌐 External Client<br/>Postman / Browser / cURL"] -->|"HTTP :8080"| GW
+    subgraph NET["Docker bridge network: vcs-network"]
+        subgraph TIER1["Tầng biên"]
+            WEB["vcs-sms-web<br/>Next.js :3000"]
+            TRF["vcs-sms-traefik<br/>:8080"]
+        end
 
-    GW --> AUTH
-    GW --> SERVER
-    GW --> MONITOR
-    GW --> REPORT
-    GW --> FILEIO
+        subgraph TIER2["Tầng ứng dụng — chỉ expose, KHÔNG publish"]
+            AU["vcs-sms-auth :8081"]
+            SV["vcs-sms-server :8082"]
+            MO["vcs-sms-monitor :8083"]
+            RP["vcs-sms-report :8084"]
+        end
 
-    AUTH --> PG
-    AUTH --> REDIS
-    SERVER --> PG
-    SERVER --> REDIS
-    SERVER --> KAFKA
-    MONITOR --> PG
-    MONITOR --> REDIS
-    MONITOR --> KAFKA
-    MONITOR --> ES
-    MONITOR -.->|"TCP"| TCPSIM
-    REPORT --> PG
-    REPORT --> ES
-    REPORT --> KAFKA
-    FILEIO --> PG
-    FILEIO --> KAFKA
+        subgraph TIER3["Tầng dữ liệu"]
+            PG["vcs-sms-postgres<br/>postgres:17-alpine"]
+            RD["vcs-sms-redis<br/>redis:8-alpine"]
+            ES["vcs-sms-elasticsearch<br/>8.12.0"]
+        end
 
-    KAFKA_INIT --> KAFKA
+        SIM["vcs-sms-tcp-simulator<br/>10.000 listener<br/>giới hạn 256MB / 1 CPU"]
+    end
 
-    REPORT -.->|"SMTP :587"| SMTP["📧 Gmail SMTP<br/>smtp.gmail.com"]
+    P1 --> WEB
+    P2 --> TRF
+    P3 --> PG
+    P4 --> RD
+    P5 --> ES
+
+    WEB --> TRF
+    TRF --> AU
+    TRF --> SV
+    TRF --> RP
+
+    AU --> PG
+    AU --> RD
+    SV --> PG
+    SV --> RD
+    MO --> RD
+    MO --> ES
+    MO --> SIM
+    RP --> PG
+    RP --> ES
+    RP --> SV
 ```
 
 ---
 
-## Container Inventory
-
-| # | Container | Image | Ports (host:container) | Volumes | Startup Order |
-|---|-----------|-------|------------------------|---------|:---:|
-| 1 | `vcs-sms-postgres` | `postgres:17-alpine` | `5432:5432` | `postgres_data` + `init.sql` | 1st |
-| 2 | `vcs-sms-redis` | `redis:8-alpine` | `6379:6379` | `redis_data` | 1st |
-| 3 | `vcs-sms-elasticsearch` | `elasticsearch:8.12.0` | `9200:9200` | `es_data` | 1st |
-| 4 | `vcs-sms-kafka` | `apache/kafka:3.9.0` | `9092:9092` | — | 1st |
-| 5 | `vcs-sms-kafka-init` | `apache/kafka:3.9.0` | — | — | After Kafka |
-| 6 | `vcs-sms-gateway` | Custom Go | `8080:8080` | `./logs/gateway` | After Redis + All Services |
-| 7 | `vcs-sms-auth` | Custom Go | `8081:8081` | `./logs/auth` | After PG + Redis |
-| 8 | `vcs-sms-server` | Custom Go | `8082:8082` | `./logs/server` | After PG + Redis + Kafka |
-| 9 | `vcs-sms-monitor` | Custom Go | `8083:8083` | `./logs/monitor` | After PG + Redis + ES + Kafka + TCP Sim |
-| 10 | `vcs-sms-report` | Custom Go | `8084:8084` | `./logs/report` | After PG + ES + Kafka |
-| 11 | `vcs-sms-fileio` | Custom Go | `8085:8085` | `./logs/fileio` + `./uploads` | After PG + Kafka |
-| 12 | `vcs-sms-tcp-simulator` | Custom Go | `9001-19000:9001-19000` | — | After Kafka Init (standalone) |
-
----
-
-## Resource Requirements (Development / Demo)
-
-| Container | CPU | RAM | Disk | Ghi chú |
-|-----------|-----|-----|------|---------|
-| PostgreSQL | 0.5-1 core | 256-512MB | ~500MB | 10K rows servers |
-| Redis | 0.25 core | 64-128MB | ~10MB | Cache chủ yếu |
-| Elasticsearch | 1-2 cores | 512MB-1GB | ~1-5GB | 10K docs × 60s × hours |
-| Kafka | 0.5-1 core | 512MB-1GB | ~500MB | 7 topics |
-| TCP Simulator | 0.5-1 core | 100-256MB | — | 10K goroutines × ~10KB |
-| 5 Business Services | ~0.25 core each | ~64MB each | — | Go binaries |
-| API Gateway | 0.25 core | 64MB | — | Reverse proxy |
-| **TOTAL** | **~4-6 cores** | **~2-3.5GB** | **~5GB** | |
-
----
-
-## Startup Sequence
+## 2. Thứ tự khởi động — `depends_on` + healthcheck
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant Docker as Docker Compose
-    participant Infra as Infrastructure
-    participant App as Application
+graph LR
+    subgraph W["Chờ healthy"]
+        PG["postgres<br/>pg_isready"]
+        RD["redis<br/>redis-cli ping"]
+        ES["elasticsearch<br/>_cluster/health"]
+        SIM["tcp-simulator<br/>nc -z :9001"]
+    end
 
-    Note over Docker,App: docker-compose up
+    PG --> AU["auth-service"]
+    RD --> AU
+    PG --> SV["server-service"]
+    RD --> SV
+    RD --> MO["monitor-service"]
+    ES --> MO
+    SIM --> MO
+    PG --> RP["report-service"]
+    ES --> RP
+    SV -->|"service_started"| RP
 
-    Docker->>Infra: 1. Start PostgreSQL
-    Docker->>Infra: 2. Start Redis
-    Docker->>Infra: 3. Start Elasticsearch
-    Docker->>Infra: 4. Start Kafka
-
-    Note over Infra: Wait for health checks
-
-    Docker->>Infra: 5. Run Kafka Init (create topics)
-    Kafka Init-->>Docker: Topics created, container exits
-
-    Docker->>App: 6. Start Auth Service
-    Docker->>App: 7. Start Server Service
-    Docker->>App: 8. Start TCP Simulator
-    Docker->>App: 9. Start File I/O Service
-    Docker->>App: 10. Start Report Service
-    Docker->>App: 11. Start Monitor Service
-
-    Note over App: Wait for all services started
-
-    Docker->>App: 12. Start API Gateway
-
-    Note over Docker: System Ready! 🚀
-    Note over Docker: Run seed_10k_servers.sql
-    Note over Docker: TCP Simulator bắt đầu mở/đóng port
-    Note over Docker: Monitor Service bắt đầu health-check cycle
+    AU --> TRF["traefik"]
+    SV --> TRF
+    RP --> TRF
+    TRF --> WEB["web"]
 ```
+
+| Phụ thuộc | Kiểu | Vì sao |
+|-----------|------|--------|
+| monitor → tcp-simulator | `service_healthy` | ping vào cổng chưa mở thì mọi server đều báo OFF sai |
+| report → server-service | `service_started` (không phải healthy) | chỉ snapshot job cần, mà nó chạy lúc 00:30 |
+| monitor → **không** có postgres | — | Monitoring hoàn toàn không đụng PostgreSQL |
 
 ---
 
-## Health Check Endpoints
+## 3. Volume và tính bền dữ liệu
 
-| Container | Health Check Method | Interval |
-|-----------|---------------------|----------|
-| PostgreSQL | `pg_isready -U vcs_admin -d vcs_sms` | 10s |
-| Redis | `redis-cli -a $REDIS_PASSWORD ping` | 10s |
-| Elasticsearch | `curl -f http://localhost:9200/_cluster/health` | 15s |
-| Kafka | `kafka-broker-api-versions.sh --bootstrap-server localhost:9092` | 15s |
-| All Go Services | `curl -f http://localhost:{port}/health` | 30s |
+```mermaid
+graph TB
+    subgraph NAMED["Named volume — sống qua docker compose down"]
+        V1["postgres_data<br/>→ /var/lib/postgresql/data"]
+        V2["redis_data<br/>→ /data (AOF)"]
+        V3["es_data<br/>→ elasticsearch/data"]
+    end
+
+    subgraph BIND["Bind mount — chỉ đọc"]
+        B1["./deployments/docker/postgres/init.sql<br/>→ docker-entrypoint-initdb.d/<br/>CHỈ chạy khi volume RỖNG"]
+        B2["./deployments/docker/postgres/seed_10k_servers.sql<br/>→ /seed/ · KHÔNG tự chạy"]
+        B3["./deployments/traefik/*.yml"]
+    end
+
+    subgraph LOGS["Bind mount — ghi log"]
+        L1["./logs/auth · server · monitor · report"]
+        L2["./logs/traefik"]
+    end
+```
+
+> ⚠️ `init.sql` chỉ chạy **lần đầu**, khi `postgres_data` còn rỗng. Sửa file này rồi restart sẽ **không** có tác dụng — phải `docker compose down -v` (mất toàn bộ dữ liệu) hoặc chạy tay bằng `psql`.
+
+---
+
+## 4. Cấu hình Redis — vì sao đúng như thế
+
+```
+redis-server --requirepass ...
+  --maxmemory 512mb
+  --maxmemory-policy volatile-lru      ← KHÔNG phải allkeys-lru
+  --appendonly yes --appendfsync everysec
+```
+
+```mermaid
+graph TB
+    A["volatile-lru:<br/>CHỈ evict key CÓ TTL"]
+
+    A --> B["✅ Được phép evict:<br/>cache danh sách (có TTL)<br/>round lock, ping queue (TTL 120s)"]
+    A --> C["🚫 KHÔNG BAO GIỜ bị evict:<br/>monitor:status:* (counter trọn đời)<br/>monitor:uptime:index<br/>server:monitor-target:*<br/>stream:monitor.status"]
+
+    C --> D["Vì sao: mất counter là mất VĨNH VIỄN.<br/>Mất projection thì Monitoring<br/>dừng hẳn cho tới khi rebuild."]
+
+    E["appendonly yes:<br/>counter sống qua restart"]
+```
+
+Nếu dùng `allkeys-lru`, Redis có thể xoá `monitor:status:*` khi thiếu bộ nhớ — và số đếm uptime trọn đời không có cách nào tính lại.
+
+---
+
+## 5. Phân tách database — một Postgres, ba DB, ba user
+
+```mermaid
+graph TB
+    subgraph PG["container postgres"]
+        subgraph DB1["identity_db"]
+            U1["identity_user"]
+        end
+        subgraph DB2["server_db"]
+            U2["server_user_v2"]
+        end
+        subgraph DB3["report_db"]
+            U3["report_user_v2"]
+        end
+    end
+
+    AU["auth-service"] -->|"chỉ user này"| U1
+    SV["server-service"] --> U2
+    RP["report-service"] --> U3
+
+    RP -.->|"❌ KHÔNG có quyền<br/>phải gọi HTTP"| U2
+```
+
+Ranh giới được cưỡng chế bằng **quyền của DB user**, không phải bằng quy ước. Report Service *không thể* `SELECT` bảng `servers` kể cả khi có người viết code như vậy — nó buộc phải gọi `GET /internal/servers`.
+
+---
+
+## 6. Vận hành thường ngày
+
+```bash
+# Khởi động toàn bộ
+docker compose up -d
+
+# Nạp 10.000 server test (không tự chạy)
+docker exec vcs-sms-postgres psql -U vcs_admin -d server_db -f /seed/seed_10k_servers.sql
+
+# Dựng lại projection để Monitoring nhìn thấy target
+docker exec vcs-sms-server /app/server-service rebuild-monitor-cache
+
+# Xem chỉ số giám sát
+docker exec vcs-sms-monitor wget -qO- localhost:8083/metrics | grep vcs_monitor
+
+# Chạy lại snapshot của một ngày cụ thể
+docker exec vcs-sms-report wget -qO- --post-data='' \
+  http://localhost:8084/internal/snapshots/2026-07-17
+
+# Soi Redis — NHỚ -n 1
+docker exec vcs-sms-redis redis-cli -a "$REDIS_PASSWORD" -n 1 dbsize
+```
+
+**Ba lỗi vận hành hay gặp:**
+
+| Triệu chứng | Nguyên nhân | Cách xử lý |
+|------------|-------------|------------|
+| `redis-cli` cho ra 0 key | đang xem db0, dữ liệu ở db1 | thêm `-n 1` |
+| Log Monitoring: *"target projection not ready"* | Redis bị xoá sạch, projection mất | chạy `rebuild-monitor-cache` |
+| `make seed` báo *"input device is not a TTY"* | Makefile dùng `docker exec -it` | gọi `docker exec` không kèm `-it` |
+
+---
+
+## 7. Ước lượng tài nguyên (10.000 server)
+
+| Container | RAM | Ghi chú |
+|-----------|-----|---------|
+| elasticsearch | ~1 GB | heap cố định 512MB (`ES_JAVA_OPTS`) |
+| postgres | ~256 MB | 10k dòng servers + ~10k snapshot/ngày |
+| redis | ≤ 512 MB | `maxmemory` chặn cứng |
+| tcp-simulator | ≤ 256 MB | giới hạn qua `deploy.resources` |
+| 4 service Go | ~100 MB/cái | monitor cao nhất — 200 goroutine + buffer 50k fact |
+| web (Next.js) | ~150 MB | |
+
+**Tải mỗi ngày:** 10.000 server × 1.440 vòng = **14,4 triệu** lượt ping và **14,4 triệu** document ES. Đây chính là lý do Report Service đọc `daily_snapshots` (10.000 dòng) chứ không truy vấn thẳng Elasticsearch mỗi lần cần báo cáo.

@@ -1,168 +1,177 @@
-# 📊 Use Case Diagram — VCS Server Management System (VCS-SMS)
+# 👥 Sơ đồ use case & phân quyền
 
-> **Ngày tạo:** 09/06/2026  
-> **Mô tả:** Sơ đồ Use Case tổng quan toàn hệ thống, bao gồm tất cả Actor và Use Case chính.
+> Cập nhật: 21/07/2026 · Nguồn: `init.sql` (seed roles/scopes) + `RequireScope(...)` trong các `cmd/main.go`.
 
 ---
 
-## 🎨 Sơ đồ Use Case
+## 1. Ba vai trò và phạm vi của từng vai
 
 ```mermaid
 graph TB
-    subgraph "VCS Server Management System"
-
-        %% ── Auth ──
-        subgraph "🔐 Authentication"
-            UC_Register["Đăng ký tài khoản"]
-            UC_Login["Đăng nhập"]
-            UC_Logout["Đăng xuất"]
-            UC_Refresh["Refresh Token"]
-            UC_Profile["Xem Profile"]
-        end
-
-        %% ── Server CRUD ──
-        subgraph "🖥️ Quản lý Server"
-            UC_Create["Tạo Server"]
-            UC_View["Xem danh sách Server\n(Filter, Sort, Paging)"]
-            UC_Detail["Xem chi tiết Server"]
-            UC_Update["Cập nhật Server"]
-            UC_Delete["Xóa Server"]
-        end
-
-        %% ── Import / Export ──
-        subgraph "📁 Import / Export"
-            UC_Import["Import Servers từ Excel"]
-            UC_Export["Export Servers ra Excel"]
-            UC_CheckImport["Kiểm tra tiến độ Import"]
-        end
-
-        %% ── Monitoring ──
-        subgraph "📡 Monitoring"
-            UC_HealthCheck["Kiểm tra trạng thái\nđịnh kỳ (Health Check)"]
-            UC_StatusUpdate["Cập nhật trạng thái\nServer On/Off"]
-        end
-
-        %% ── Report ──
-        subgraph "📊 Báo cáo"
-            UC_DailyReport["Gửi báo cáo định kỳ\nhàng ngày qua Email"]
-            UC_OnDemandReport["Gửi báo cáo chủ động\n(theo khoảng ngày)"]
-            UC_ViewSummary["Xem tóm tắt báo cáo"]
-        end
+    subgraph ROLES["Vai trò"]
+        AD["👑 admin"]
+        OP["🔧 operator"]
+        VW["👁️ viewer"]
     end
 
-    %% ── Actors ──
-    Admin["👑 Admin\n(Full quyền)"]
-    Operator["🔧 Operator\n(Read + Update + View Report)"]
-    Viewer["👀 Viewer\n(Chỉ Read)"]
-    CronScheduler["⏰ Cron Scheduler\n(Tự động)"]
-    MonitorSvc["📡 Monitor Service\n(Tự động 60s/cycle)"]
-    EmailSystem["📧 Gmail SMTP\n(External)"]
+    subgraph UC_R["Xem — mọi vai trò đều có"]
+        R1["Xem danh sách server"]
+        R2["Xem chi tiết server"]
+        R3["Xem thống kê + uptime"]
+        R4["Xem tóm tắt báo cáo"]
+    end
 
-    %% ── Admin use cases ──
-    Admin --> UC_Register
-    Admin --> UC_Login
-    Admin --> UC_Logout
-    Admin --> UC_Refresh
-    Admin --> UC_Profile
-    Admin --> UC_Create
-    Admin --> UC_View
-    Admin --> UC_Detail
-    Admin --> UC_Update
-    Admin --> UC_Delete
-    Admin --> UC_Import
-    Admin --> UC_CheckImport
-    Admin --> UC_Export
-    Admin --> UC_OnDemandReport
-    Admin --> UC_ViewSummary
+    subgraph UC_W["Vận hành — operator trở lên"]
+        W1["Tạo server"]
+        W2["Sửa server"]
+        W3["Xoá server"]
+        W4["Import Excel"]
+        W5["Export Excel"]
+        W6["Gửi báo cáo qua email"]
+        W7["Xem chi tiết một report job"]
+    end
 
-    %% ── Operator use cases ──
-    Operator --> UC_Register
-    Operator --> UC_Login
-    Operator --> UC_Logout
-    Operator --> UC_Refresh
-    Operator --> UC_Profile
-    Operator --> UC_View
-    Operator --> UC_Detail
-    Operator --> UC_Update
-    Operator --> UC_ViewSummary
+    subgraph UC_A["Quản trị — chỉ admin"]
+        A1["Liệt kê người dùng"]
+        A2["Đổi vai trò người dùng"]
+    end
 
-    %% ── Viewer use cases ──
-    Viewer --> UC_Register
-    Viewer --> UC_Login
-    Viewer --> UC_Logout
-    Viewer --> UC_Refresh
-    Viewer --> UC_Profile
-    Viewer --> UC_View
-    Viewer --> UC_Detail
-    Viewer --> UC_ViewSummary
-
-    %% ── System use cases ──
-    MonitorSvc --> UC_HealthCheck
-    MonitorSvc --> UC_StatusUpdate
-    CronScheduler --> UC_DailyReport
-    UC_DailyReport --> EmailSystem
-    UC_OnDemandReport --> EmailSystem
-
-    %% ── Relationships ──
-    UC_HealthCheck -.->|"include"| UC_StatusUpdate
-    UC_DailyReport -.->|"include"| UC_ViewSummary
-    UC_OnDemandReport -.->|"include"| UC_ViewSummary
-    UC_Import -.->|"extend"| UC_CheckImport
-    UC_View -.->|"extend"| UC_Detail
+    VW --> UC_R
+    OP --> UC_R
+    OP --> UC_W
+    AD --> UC_R
+    AD --> UC_W
+    AD --> UC_A
 ```
 
----
-
-## 📋 Bảng tóm tắt Actor
-
-| Actor | Mô tả | Use Case chính |
-|-------|-------|---------------|
-| 👑 **Admin** | Toàn quyền hệ thống, quản lý user & server | Tất cả 16 use case |
-| 🔧 **Operator** | Vận hành, giám sát hệ thống | Xem/Update server, Xem báo cáo |
-| 👀 **Viewer** | Chỉ đọc, theo dõi trạng thái | Xem server, Xem báo cáo |
-| 📡 **Monitor Service** | Hệ thống tự động, chạy mỗi 60 giây | Health-check 10.000 server |
-| ⏰ **Cron Scheduler** | Hệ thống tự động, chạy 08:00 AM mỗi ngày | Trigger báo cáo định kỳ |
-| 📧 **Gmail SMTP** | Dịch vụ ngoài (External System) | Nhận và gửi email báo cáo |
+Quan hệ là **bao hàm chặt**: `viewer ⊂ operator ⊂ admin`.
 
 ---
 
-## 🎯 Phân quyền chi tiết (RBAC Matrix)
+## 2. Ma trận 13 scope × 3 vai trò
 
-| Use Case | Admin | Operator | Viewer | Ghi chú |
-|----------|:-----:|:--------:|:------:|---------|
-| Đăng ký | ✅ | ✅ | ✅ | Public |
-| Đăng nhập | ✅ | ✅ | ✅ | Public |
-| Đăng xuất | ✅ | ✅ | ✅ | Auth required |
-| Refresh Token | ✅ | ✅ | ✅ | Public |
-| Xem Profile | ✅ | ✅ | ✅ | Auth required |
-| **Tạo Server** | ✅ | ❌ | ❌ | `server:create` |
-| **Xem danh sách Server** | ✅ | ✅ | ✅ | `server:read` |
-| **Xem chi tiết Server** | ✅ | ✅ | ✅ | `server:read` |
-| **Cập nhật Server** | ✅ | ✅ | ❌ | `server:update` |
-| **Xóa Server** | ✅ | ❌ | ❌ | `server:delete` |
-| **Import Excel** | ✅ | ❌ | ❌ | `server:import` |
-| **Kiểm tra tiến độ Import** | ✅ | ❌ | ❌ | `server:import` |
-| **Export Excel** | ✅ | ❌ | ❌ | `server:export` |
-| **Gửi báo cáo chủ động** | ✅ | ❌ | ❌ | `report:send` |
-| **Xem tóm tắt báo cáo** | ✅ | ✅ | ✅ | `report:view` |
+| Scope | Endpoint | viewer | operator | admin |
+|-------|----------|:------:|:--------:|:-----:|
+| `server:list` | `GET /servers` | ✅ | ✅ | ✅ |
+| `server:view` | `GET /servers/:id` | ✅ | ✅ | ✅ |
+| `server:stats` | `GET /servers/stats`, `/uptime` | ✅ | ✅ | ✅ |
+| `report:view` | `GET /reports/summary` | ✅ | ✅ | ✅ |
+| `server:create` | `POST /servers` | ❌ | ✅ | ✅ |
+| `server:update` | `PUT /servers/:id` | ❌ | ✅ | ✅ |
+| `server:delete` | `DELETE /servers/:id` | ❌ | ✅ | ✅ |
+| `server:import` | `POST /servers/import` | ❌ | ✅ | ✅ |
+| `server:export` | `POST /servers/export` | ❌ | ✅ | ✅ |
+| `report:send` | `POST /reports` | ❌ | ✅ | ✅ |
+| `report:view_detail` | `GET /reports/:id` | ❌ | ✅ | ✅ |
+| `user:list` | `GET /auth/users` | ❌ | ❌ | ✅ |
+| `user:manage_role` | `PUT /auth/users/:id/role` | ❌ | ❌ | ✅ |
 
----
-
-## 🔗 Mối quan hệ giữa các Use Case
-
-| Quan hệ | Từ | Đến | Ý nghĩa |
-|---------|----|-----|---------|
-| **\<include\>** | Health Check | Cập nhật Status | Mỗi lần check luôn cập nhật trạng thái On/Off |
-| **\<include\>** | Daily Report | View Summary | Báo cáo định kỳ luôn bao gồm số liệu tổng hợp |
-| **\<include\>** | On-Demand Report | View Summary | Báo cáo chủ động cũng cần tính toán số liệu |
-| **\<extend\>** | Import | Check Import Status | Sau khi import, user có thể kiểm tra tiến độ xử lý |
-| **\<extend\>** | View List | View Detail | Từ danh sách server có thể xem chi tiết từng server |
+Scope ánh xạ **1-1 theo endpoint**, không gộp thành `read`/`write`. Thêm endpoint mới là thêm scope mới, chứ không nới rộng một scope sẵn có.
 
 ---
 
-## 📝 Ghi chú
+## 3. Scope được kiểm ở đâu
 
-- **Monitor Service** và **Cron Scheduler** là các Actor hệ thống, không phải người dùng thực. Chúng tự động thực thi các use case theo chu kỳ.
-- **Gmail SMTP** là External System, nhận email từ Report Service để gửi đến Admin.
-- Mối quan hệ **\<include\>** thể hiện use case bắt buộc phải gọi đến use case khác.
-- Mối quan hệ **\<extend\>** thể hiện use case tùy chọn có thể mở rộng thêm.
+```mermaid
+sequenceDiagram
+    participant U as Người dùng
+    participant T as Traefik
+    participant A as auth-service
+    participant S as service đích
+
+    U->>T: request + Bearer token
+    T->>A: ForwardAuth /internal/verify
+    note right of A: chỉ trả lời "token này có hợp lệ không?"<br/>KHÔNG quyết định "được làm gì"
+    A-->>T: 200 + X-User-Scopes: "server:list,server:view,..."
+    T->>S: chuyển tiếp kèm header
+    S->>S: RequireScope("server:create")
+    alt scope không có trong header
+        S-->>U: 403 Forbidden
+    else có
+        S-->>U: 200
+    end
+```
+
+**Tách bạch có chủ đích:** *xác thực* (bạn là ai) nằm ở gateway — một chỗ duy nhất, không lặp lại. *Phân quyền* (bạn được làm gì) nằm ở service — chỉ service mới biết endpoint của nó đòi hỏi gì.
+
+Scope được nhúng thẳng vào JWT lúc login, nên `/internal/verify` không cần truy vấn database. Cái giá: **đổi vai trò chỉ có hiệu lực khi token cũ hết hạn hoặc người dùng đăng nhập lại**.
+
+---
+
+## 4. Use case theo màn hình web
+
+```mermaid
+graph LR
+    subgraph PUB["Không cần đăng nhập"]
+        L["/login"]
+        RG["/register<br/>→ mặc định gán role viewer"]
+    end
+
+    subgraph APP["Cần đăng nhập"]
+        D["/ — dashboard"]
+        SL["/servers — danh sách + lọc + import/export"]
+        SD["/servers/[id] — chi tiết"]
+        RP["/reports — uptime + gửi mail"]
+        US["/users — quản trị"]
+        PF["/profile"]
+    end
+
+    F["/403 — thiếu quyền"]
+
+    L --> D
+    RG --> L
+    D --> SL --> SD
+    D --> RP
+    D --> US
+    US -.->|"viewer/operator"| F
+```
+
+Đăng ký mới luôn nhận role **viewer** (nguyên tắc đặc quyền tối thiểu). Muốn nâng quyền phải có admin đổi qua `PUT /auth/users/:id/role`.
+
+---
+
+## 5. Hai luồng gửi báo cáo — cùng một đích, khác điểm xuất phát
+
+```mermaid
+graph TB
+    subgraph AUTO["⏰ Tự động"]
+        C1["cron 10:00 giờ VN"]
+        C2["khoảng = hôm qua → hôm qua"]
+        C3["người nhận = REPORT_DAILY_RECIPIENT"]
+        C4["requester_id = 'scheduler'"]
+        C5["report_type = 'daily'"]
+    end
+
+    subgraph MAN["👤 Theo yêu cầu"]
+        M1["operator bấm nút ở /reports"]
+        M2["khoảng tuỳ chọn, tối đa 31 ngày"]
+        M3["người nhận do người dùng nhập"]
+        M4["requester_id = user id thật"]
+        M5["report_type = 'on-demand'"]
+    end
+
+    SAME["SendService.Send()<br/>CÙNG một hàm"]
+
+    C1 --> SAME
+    M1 --> SAME
+    SAME --> OUT["Email HTML + uptime_*.xlsx<br/>nội dung ĐỊNH DẠNG GIỐNG HỆT NHAU"]
+```
+
+Cả hai dùng chung `SendService.Send()`, chung template `daily_report.html`, chung `excel.Generator`. Khác nhau chỉ ở khoảng ngày, người nhận và metadata ghi vào `report_jobs`.
+
+**Ràng buộc chung cho cả hai:** `end_date` bắt buộc phải là một ngày **đã kết thúc**. Báo cáo cho ngày hôm nay bị từ chối, vì snapshot của một ngày chỉ tồn tại sau khi ngày đó khép lại (job 00:30 hôm sau).
+
+---
+
+## 6. Những gì hệ thống KHÔNG cho phép
+
+| Hành động | Vì sao chặn |
+|-----------|-------------|
+| Truy cập thẳng `localhost:8082` | 4 service dùng `expose`, không publish port — nếu không sẽ giả mạo được header `X-User-Scopes` |
+| Xin báo cáo cho ngày hôm nay | snapshot chưa tồn tại; số liệu dở dang là số liệu sai |
+| Báo cáo khoảng > 31 ngày | `REPORT_MAX_RANGE_DAYS` chặn |
+| Báo cáo vắt qua ngày thiếu snapshot | `ErrDataUnavailable` — trung bình vắt qua lỗ hổng là bịa số |
+| Import IP ngoài CIDR allowlist | `SERVER_IP_NOT_ALLOWED` cho từng dòng |
+| Gửi mail tới domain lạ | `SMTP_RECIPIENT_DOMAINS` chặn, trả `ErrRecipientNotAllowed` |
+| Tự động gửi lại job `delivery_unknown` | thư có thể đã tới — retry mù sẽ gửi hai lần |
+| Dùng lại `server_id` đã xoá cho server khác | `UNIQUE(server_id)` toàn cục bảo vệ lịch sử báo cáo |
