@@ -8,17 +8,18 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
 type fakeWriter struct {
 	mu       sync.Mutex
-	batches  [][]Fact
+	batches  [][]model.Fact
 	err      error
 	failFor  int // fail this many calls, then succeed
 	attempts int
 }
 
-func (w *fakeWriter) Write(ctx context.Context, facts []Fact) error {
+func (w *fakeWriter) Write(ctx context.Context, facts []model.Fact) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.attempts++
@@ -29,7 +30,7 @@ func (w *fakeWriter) Write(ctx context.Context, facts []Fact) error {
 	if w.err != nil {
 		return w.err
 	}
-	w.batches = append(w.batches, append([]Fact(nil), facts...))
+	w.batches = append(w.batches, append([]model.Fact(nil), facts...))
 	return nil
 }
 
@@ -53,8 +54,8 @@ func newTestBuffer(w factWriter, capacity int) *FactBuffer {
 	return NewFactBuffer(w, capacity, nil, zerolog.New(io.Discard))
 }
 
-func fact(id string) Fact {
-	return Fact{ServerID: id, Status: statusON, CheckedAt: time.Now().UTC(), RoundID: 1}
+func fact(id string) model.Fact {
+	return model.Fact{ServerID: id, Status: model.StatusON, CheckedAt: time.Now().UTC(), RoundID: 1}
 }
 
 func TestFactBuffer_FlushWritesPending(t *testing.T) {

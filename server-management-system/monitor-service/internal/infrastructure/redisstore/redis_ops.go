@@ -1,4 +1,4 @@
-package monitor
+package redisstore
 
 import (
 	"context"
@@ -7,15 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
-
-// Target is the metadata Monitoring needs to ping one server.
-type Target struct {
-	ServerID   string
-	ServerName string
-	IPv4       string
-	TCPPort    int
-}
 
 // RedisOps is the Redis surface Monitoring uses.
 type RedisOps interface {
@@ -31,8 +24,8 @@ type RedisOps interface {
 	QueueDepth(ctx context.Context, roundID int64) (int64, error)
 	// PopTarget blocks up to timeout for the next server_id of the round.
 	PopTarget(ctx context.Context, roundID int64, timeout time.Duration) (string, error)
-	GetTarget(ctx context.Context, serverID string) (*Target, error)
-	ApplyStatus(ctx context.Context, t Target, status, checkedAt string, latencyMs int, roundID int64) (int, error)
+	GetTarget(ctx context.Context, serverID string) (*model.Target, error)
+	ApplyStatus(ctx context.Context, t model.Target, status, checkedAt string, latencyMs int, roundID int64) (int, error)
 }
 
 type redisOps struct {
@@ -110,7 +103,7 @@ func (r *redisOps) PopTarget(ctx context.Context, roundID int64, timeout time.Du
 }
 
 // GetTarget returns nil when the server was deleted mid-round.
-func (r *redisOps) GetTarget(ctx context.Context, serverID string) (*Target, error) {
+func (r *redisOps) GetTarget(ctx context.Context, serverID string) (*model.Target, error) {
 	fields, err := r.client.HGetAll(ctx, targetKey(serverID)).Result()
 	if err != nil {
 		return nil, err
@@ -122,7 +115,7 @@ func (r *redisOps) GetTarget(ctx context.Context, serverID string) (*Target, err
 	if err != nil {
 		return nil, fmt.Errorf("target %s has invalid tcp_port %q", serverID, fields["tcp_port"])
 	}
-	return &Target{
+	return &model.Target{
 		ServerID:   serverID,
 		ServerName: fields["server_name"],
 		IPv4:       fields["ipv4"],
@@ -130,7 +123,7 @@ func (r *redisOps) GetTarget(ctx context.Context, serverID string) (*Target, err
 	}, nil
 }
 
-func (r *redisOps) ApplyStatus(ctx context.Context, t Target, status, checkedAt string, latencyMs int, roundID int64) (int, error) {
+func (r *redisOps) ApplyStatus(ctx context.Context, t model.Target, status, checkedAt string, latencyMs int, roundID int64) (int, error) {
 	return statusScript.Run(ctx, r.client,
 		[]string{statusKey(t.ServerID), statusStream, uptimeIndexKey},
 		t.ServerID, status, checkedAt, latencyMs, roundID,

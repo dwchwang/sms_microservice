@@ -6,6 +6,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/metrics"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/redisstore"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
 const (
@@ -21,33 +24,22 @@ type Pinger interface {
 
 // FactSink receives one health fact per completed check.
 type FactSink interface {
-	Add(fact Fact)
-}
-
-// Fact is a single check result, as stored for uptime reporting.
-type Fact struct {
-	ServerID   string
-	ServerName string
-	Status     string
-	CheckedAt  time.Time
-	RoundID    int64
-	LatencyMs  int
-	ErrorCode  string
+	Add(fact model.Fact)
 }
 
 // Pool runs the goroutines that drain the round queue. Every instance runs a
 // pool, including the one that won the scheduling lock.
 type Pool struct {
-	ops     RedisOps
+	ops     redisstore.RedisOps
 	pinger  Pinger
 	facts   FactSink
-	metrics *Metrics
+	metrics *metrics.Metrics
 	workers int
 	log     zerolog.Logger
 }
 
 // NewPool creates a Pool of the given size. metrics may be nil.
-func NewPool(ops RedisOps, pinger Pinger, facts FactSink, metrics *Metrics, workers int, log zerolog.Logger) *Pool {
+func NewPool(ops redisstore.RedisOps, pinger Pinger, facts FactSink, metrics *metrics.Metrics, workers int, log zerolog.Logger) *Pool {
 	return &Pool{ops: ops, pinger: pinger, facts: facts, metrics: metrics, workers: workers, log: log}
 }
 
@@ -120,9 +112,9 @@ func (p *Pool) check(ctx context.Context, serverID string, round int64) {
 	}
 
 	up, latency, errCode := p.pinger.Ping(ctx, target.IPv4, target.TCPPort)
-	status := statusOFF
+	status := model.StatusOFF
 	if up {
-		status = statusON
+		status = model.StatusON
 	}
 	checkedAt := time.Now().UTC()
 
@@ -141,16 +133,16 @@ func (p *Pool) check(ctx context.Context, serverID string, round int64) {
 		p.log.Error().Err(err).Str("server_id", serverID).Msg("Failed to apply status")
 		return
 	}
-	if code == statusSkippedStale {
+	if code == redisstore.StatusSkippedStale {
 		return
 	}
-	if code == statusChanged {
+	if code == redisstore.StatusChanged {
 		p.log.Info().Str("server_id", serverID).Str("status", status).
 			Int64("round_id", round).Msg("Status changed")
 	}
 
 	// Elasticsearch is the side path: a check counts even if the fact is lost.
-	p.facts.Add(Fact{
+	p.facts.Add(model.Fact{
 		ServerID:   target.ServerID,
 		ServerName: target.ServerName,
 		Status:     status,

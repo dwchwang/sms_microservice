@@ -1,4 +1,4 @@
-package monitor
+package redisstore
 
 import (
 	"fmt"
@@ -25,22 +25,8 @@ const (
 	uptimeIndexKey = "monitor:uptime:index"
 )
 
-const (
-	// RoundSeconds is the check interval every round_id is derived from.
-	RoundSeconds = 60
-
-	// roundTTL spans two rounds so a round's keys outlive it briefly, then go.
-	roundTTL = 120 * time.Second
-
-	statusON  = "ON"
-	statusOFF = "OFF"
-)
-
-// RoundID buckets a wall-clock time into a round. Callers pass Redis server
-// time so every instance agrees on the round even when local clocks drift.
-func RoundID(t time.Time) int64 {
-	return t.Unix() / RoundSeconds
-}
+// roundTTL spans two rounds so a round's keys outlive it briefly, then go.
+const roundTTL = 120 * time.Second
 
 func roundLockKey(roundID int64) string { return fmt.Sprintf("%s%d", roundLockPrefix, roundID) }
 func queueKey(roundID int64) string     { return fmt.Sprintf("%s%d", queuePrefix, roundID) }

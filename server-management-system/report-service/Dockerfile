@@ -22,7 +22,7 @@ RUN mkdir -p /app/bin
 COPY --from=builder /app/bin/report-service ./bin/report-service
 
 # Copy email templates to the source-relative path used by runtime.Caller.
-COPY --from=builder /app/report-service/internal/email/templates /app/report-service/internal/email/templates
+COPY --from=builder /app/report-service/internal/infrastructure/email/templates /app/report-service/internal/infrastructure/email/templates
 
 RUN mkdir -p /var/log/vcs-sms
 

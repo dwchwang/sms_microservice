@@ -215,7 +215,7 @@ func TestDelete_RemovesIDBeforeHash(t *testing.T) {
 		t.Errorf("unexpected uptime index key %q", fake.calls[2].key)
 	}
 	if fake.calls[3].key != "monitor:status:SRV-001" {
-		t.Errorf("unexpected status key %q", fake.calls[3].key)
+		t.Errorf("unexpected status key %q", fake.calls[4].key)
 	}
 }
 

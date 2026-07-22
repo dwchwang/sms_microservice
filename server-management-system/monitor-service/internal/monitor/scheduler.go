@@ -5,6 +5,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/metrics"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/redisstore"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
 const (
@@ -15,8 +18,8 @@ const (
 // Scheduler loads one ping queue per round. It runs on every instance; only
 // the instance that wins the round lock does the loading.
 type Scheduler struct {
-	ops     RedisOps
-	metrics *Metrics
+	ops     redisstore.RedisOps
+	metrics *metrics.Metrics
 	log     zerolog.Logger
 
 	// prevRound is the round measured for checks_missing on the next tick.
@@ -24,7 +27,7 @@ type Scheduler struct {
 }
 
 // NewScheduler creates a Scheduler. metrics may be nil.
-func NewScheduler(ops RedisOps, metrics *Metrics, log zerolog.Logger) *Scheduler {
+func NewScheduler(ops redisstore.RedisOps, metrics *metrics.Metrics, log zerolog.Logger) *Scheduler {
 	return &Scheduler{ops: ops, metrics: metrics, log: log}
 }
 
@@ -47,9 +50,9 @@ func (s *Scheduler) nextRoundDelay(ctx context.Context) time.Duration {
 	now, err := s.ops.Time(ctx)
 	if err != nil {
 		s.log.Error().Err(err).Msg("Failed to read Redis time; falling back to a fixed delay")
-		return RoundSeconds * time.Second
+		return model.RoundSeconds * time.Second
 	}
-	return time.Duration(RoundSeconds-now.Unix()%RoundSeconds) * time.Second
+	return time.Duration(model.RoundSeconds-now.Unix()%model.RoundSeconds) * time.Second
 }
 
 func (s *Scheduler) sleepToNextRound(ctx context.Context) bool {
@@ -72,7 +75,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 		s.log.Error().Err(err).Msg("Failed to read Redis time")
 		return
 	}
-	roundID := RoundID(now)
+	roundID := model.RoundID(now)
 	s.measurePrevRound(ctx, roundID)
 
 	won, err := s.ops.AcquireRoundLock(ctx, roundID)
@@ -93,7 +96,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	}
 	if !ready {
 		s.log.Warn().Int64("round_id", roundID).
-			Msg("Target projection not ready; skipping round. Run 'server-service rebuild-monitor-cache'")
+			Msg("model.Target projection not ready; skipping round. Run 'server-service rebuild-monitor-cache'")
 		return
 	}
 

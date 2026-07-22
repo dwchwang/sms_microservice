@@ -7,15 +7,17 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/redisstore"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
-func newTestPool(ops RedisOps, pinger Pinger, sink FactSink, workers int) *Pool {
+func newTestPool(ops redisstore.RedisOps, pinger Pinger, sink FactSink, workers int) *Pool {
 	return NewPool(ops, pinger, sink, nil, workers, zerolog.New(io.Discard))
 }
 
 func TestCheck_ReportsServerUp(t *testing.T) {
 	ops := newFakeOps()
-	target := Target{ServerID: "SRV-001", ServerName: "web-01", IPv4: "10.0.0.1", TCPPort: 8080}
+	target := model.Target{ServerID: "SRV-001", ServerName: "web-01", IPv4: "10.0.0.1", TCPPort: 8080}
 	ops.addTarget(target)
 	pinger := newFakePinger()
 	pinger.up["10.0.0.1"] = true
@@ -27,7 +29,7 @@ func TestCheck_ReportsServerUp(t *testing.T) {
 		t.Fatalf("applied %d statuses, want 1", len(ops.applied))
 	}
 	got := ops.applied[0]
-	if got.Status != statusON {
+	if got.Status != model.StatusON {
 		t.Errorf("Status = %q, want ON", got.Status)
 	}
 	if got.RoundID != 100 {
@@ -46,19 +48,19 @@ func TestCheck_ReportsServerUp(t *testing.T) {
 	if facts[0].ServerName != "web-01" {
 		t.Errorf("fact ServerName = %q, want web-01", facts[0].ServerName)
 	}
-	if facts[0].Status != statusON || facts[0].RoundID != 100 {
+	if facts[0].Status != model.StatusON || facts[0].RoundID != 100 {
 		t.Errorf("unexpected fact %#v", facts[0])
 	}
 }
 
 func TestCheck_ReportsServerDownWithErrorCode(t *testing.T) {
 	ops := newFakeOps()
-	ops.addTarget(Target{ServerID: "SRV-001", ServerName: "web-01", IPv4: "10.0.0.9", TCPPort: 80})
+	ops.addTarget(model.Target{ServerID: "SRV-001", ServerName: "web-01", IPv4: "10.0.0.9", TCPPort: 80})
 	sink := &fakeSink{}
 
 	newTestPool(ops, newFakePinger(), sink, 1).check(context.Background(), "SRV-001", 100)
 
-	if ops.applied[0].Status != statusOFF {
+	if ops.applied[0].Status != model.StatusOFF {
 		t.Errorf("Status = %q, want OFF", ops.applied[0].Status)
 	}
 	if got := sink.all()[0].ErrorCode; got != "TIMEOUT" {
@@ -86,8 +88,8 @@ func TestCheck_SkipsServerDeletedMidRound(t *testing.T) {
 // that the status hash rejected.
 func TestCheck_StaleRoundRecordsNoFact(t *testing.T) {
 	ops := newFakeOps()
-	ops.applyCode = statusSkippedStale
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	ops.applyCode = redisstore.StatusSkippedStale
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
 	sink := &fakeSink{}
 
 	newTestPool(ops, newFakePinger(), sink, 1).check(context.Background(), "SRV-001", 100)
@@ -99,8 +101,8 @@ func TestCheck_StaleRoundRecordsNoFact(t *testing.T) {
 
 func TestCheck_UnchangedStatusStillRecordsFact(t *testing.T) {
 	ops := newFakeOps()
-	ops.applyCode = statusUnchanged
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	ops.applyCode = redisstore.StatusUnchanged
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
 	sink := &fakeSink{}
 
 	newTestPool(ops, newFakePinger(), sink, 1).check(context.Background(), "SRV-001", 100)
@@ -115,7 +117,7 @@ func TestCheck_UnchangedStatusStillRecordsFact(t *testing.T) {
 func TestCheck_ApplyErrorRecordsNoFact(t *testing.T) {
 	ops := newFakeOps()
 	ops.applyErr = errBoom
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
 	sink := &fakeSink{}
 
 	newTestPool(ops, newFakePinger(), sink, 1).check(context.Background(), "SRV-001", 100)
@@ -128,7 +130,7 @@ func TestCheck_ApplyErrorRecordsNoFact(t *testing.T) {
 func TestPool_DrainsTheQueue(t *testing.T) {
 	ops := newFakeOps()
 	for _, id := range []string{"SRV-001", "SRV-002", "SRV-003"} {
-		ops.addTarget(Target{ServerID: id, IPv4: "10.0.0.1", TCPPort: 80})
+		ops.addTarget(model.Target{ServerID: id, IPv4: "10.0.0.1", TCPPort: 80})
 	}
 	ops.current = 100
 	ops.queues[100] = []string{"SRV-001", "SRV-002", "SRV-003"}
@@ -144,7 +146,7 @@ func TestPool_DrainsTheQueue(t *testing.T) {
 // whole round-switch mechanism.
 func TestPool_FollowsRoundSwitch(t *testing.T) {
 	ops := newFakeOps()
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
 	ops.current = 100
 	ops.queues[100] = []string{"SRV-001"}
 
@@ -171,7 +173,7 @@ func TestPool_FollowsRoundSwitch(t *testing.T) {
 
 func TestPool_IdlesWhenNoRoundIsLoaded(t *testing.T) {
 	ops := newFakeOps() // current stays 0
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()

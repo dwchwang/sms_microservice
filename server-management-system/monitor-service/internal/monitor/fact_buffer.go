@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/metrics"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
 const (
@@ -17,7 +19,7 @@ const (
 
 // factWriter is the sink the buffer flushes into.
 type factWriter interface {
-	Write(ctx context.Context, facts []Fact) error
+	Write(ctx context.Context, facts []model.Fact) error
 }
 
 // FactBuffer batches health facts and flushes them on size or interval.
@@ -27,29 +29,29 @@ type factWriter interface {
 type FactBuffer struct {
 	writer   factWriter
 	capacity int
-	metrics  *Metrics
+	metrics  *metrics.Metrics
 	log      zerolog.Logger
 
 	mu      sync.Mutex
-	pending []Fact
+	pending []model.Fact
 
 	dropped uint64
 	failed  uint64
 }
 
 // NewFactBuffer creates a buffer holding at most capacity facts. metrics may be nil.
-func NewFactBuffer(writer factWriter, capacity int, metrics *Metrics, log zerolog.Logger) *FactBuffer {
+func NewFactBuffer(writer factWriter, capacity int, metrics *metrics.Metrics, log zerolog.Logger) *FactBuffer {
 	return &FactBuffer{
 		writer:   writer,
 		capacity: capacity,
 		metrics:  metrics,
 		log:      log,
-		pending:  make([]Fact, 0, flushSize),
+		pending:  make([]model.Fact, 0, flushSize),
 	}
 }
 
 // Add queues a fact, dropping it when the buffer is full.
-func (b *FactBuffer) Add(fact Fact) {
+func (b *FactBuffer) Add(fact model.Fact) {
 	b.mu.Lock()
 	if len(b.pending) >= b.capacity {
 		b.dropped++
@@ -77,7 +79,7 @@ func (b *FactBuffer) Run(ctx context.Context) {
 			b.Flush(flushCtx)
 			cancel()
 			b.log.Info().Uint64("dropped", b.Dropped()).Uint64("failed_batches", b.Failed()).
-				Msg("Fact buffer stopped")
+				Msg("model.Fact buffer stopped")
 			return
 		case <-ticker.C:
 			b.Flush(ctx)
@@ -94,7 +96,7 @@ func (b *FactBuffer) Flush(ctx context.Context) {
 		return
 	}
 	batch := b.pending
-	b.pending = make([]Fact, 0, flushSize)
+	b.pending = make([]model.Fact, 0, flushSize)
 	b.mu.Unlock()
 
 	for attempt := 1; ; attempt++ {

@@ -11,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/vcs-sms/report-service/internal/dto"
-	"github.com/vcs-sms/report-service/internal/email"
-	"github.com/vcs-sms/report-service/internal/excel"
+	"github.com/vcs-sms/report-service/internal/infrastructure/email"
+	"github.com/vcs-sms/report-service/internal/infrastructure/excel"
 	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/repository"
 )

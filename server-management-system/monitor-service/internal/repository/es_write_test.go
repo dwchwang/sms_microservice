@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/vcs-sms/monitor-service/internal/monitor"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
 func newTestWriter(t *testing.T, handler http.HandlerFunc) FactWriter {
@@ -28,8 +28,8 @@ func newTestWriter(t *testing.T, handler http.HandlerFunc) FactWriter {
 	return NewFactWriter(client, "server-status-logs")
 }
 
-func sampleFacts() []monitor.Fact {
-	return []monitor.Fact{{
+func sampleFacts() []model.Fact {
+	return []model.Fact{{
 		ServerID:  "SRV-001",
 		Status:    "ON",
 		CheckedAt: time.Date(2026, 7, 17, 10, 0, 0, 0, time.UTC),

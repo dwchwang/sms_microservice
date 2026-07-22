@@ -1,4 +1,4 @@
-package monitor
+package redisstore
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
 // The script is Redis-side logic; only a real Redis proves it. Run:
@@ -34,8 +35,8 @@ func setupRedis(t *testing.T) (RedisOps, *redis.Client) {
 	return NewRedisOps(client), client
 }
 
-func target(id string) Target {
-	return Target{ServerID: id, ServerName: "web-" + id, IPv4: "10.0.0.1", TCPPort: 80}
+func target(id string) model.Target {
+	return model.Target{ServerID: id, ServerName: "web-" + id, IPv4: "10.0.0.1", TCPPort: 80}
 }
 
 func counters(t *testing.T, c *redis.Client, id string) (total, ons int, pct float64) {
@@ -54,24 +55,24 @@ func TestIntegration_ScriptReturnCodes(t *testing.T) {
 	tg := target("SRV-1")
 
 	// A first check is UNKNOWN -> ON, which is a real transition.
-	if code, err := ops.ApplyStatus(ctx, tg, "ON", "2026-07-17T10:00:00Z", 5, 100); err != nil || code != statusChanged {
-		t.Fatalf("first check: code = %d, err = %v; want %d", code, err, statusChanged)
+	if code, err := ops.ApplyStatus(ctx, tg, "ON", "2026-07-17T10:00:00Z", 5, 100); err != nil || code != StatusChanged {
+		t.Fatalf("first check: code = %d, err = %v; want %d", code, err, StatusChanged)
 	}
 	// Same status, newer round: written, but no event.
-	if code, _ := ops.ApplyStatus(ctx, tg, "ON", "2026-07-17T10:01:00Z", 5, 101); code != statusUnchanged {
-		t.Errorf("unchanged: code = %d, want %d", code, statusUnchanged)
+	if code, _ := ops.ApplyStatus(ctx, tg, "ON", "2026-07-17T10:01:00Z", 5, 101); code != StatusUnchanged {
+		t.Errorf("unchanged: code = %d, want %d", code, StatusUnchanged)
 	}
 	// Older round arriving late.
-	if code, _ := ops.ApplyStatus(ctx, tg, "OFF", "2026-07-17T09:59:00Z", 5, 99); code != statusSkippedStale {
-		t.Errorf("stale: code = %d, want %d", code, statusSkippedStale)
+	if code, _ := ops.ApplyStatus(ctx, tg, "OFF", "2026-07-17T09:59:00Z", 5, 99); code != StatusSkippedStale {
+		t.Errorf("stale: code = %d, want %d", code, StatusSkippedStale)
 	}
 	// Exact replay of the round already applied.
-	if code, _ := ops.ApplyStatus(ctx, tg, "ON", "2026-07-17T10:01:00Z", 5, 101); code != statusSkippedStale {
-		t.Errorf("replay: code = %d, want %d", code, statusSkippedStale)
+	if code, _ := ops.ApplyStatus(ctx, tg, "ON", "2026-07-17T10:01:00Z", 5, 101); code != StatusSkippedStale {
+		t.Errorf("replay: code = %d, want %d", code, StatusSkippedStale)
 	}
 	// A real transition.
-	if code, _ := ops.ApplyStatus(ctx, tg, "OFF", "2026-07-17T10:02:00Z", 3000, 102); code != statusChanged {
-		t.Errorf("transition: code = %d, want %d", code, statusChanged)
+	if code, _ := ops.ApplyStatus(ctx, tg, "OFF", "2026-07-17T10:02:00Z", 3000, 102); code != StatusChanged {
+		t.Errorf("transition: code = %d, want %d", code, StatusChanged)
 	}
 }
 
@@ -145,3 +146,4 @@ func TestIntegration_UptimeIndexServesDistributionAndWorst(t *testing.T) {
 		t.Errorf("worst = %+v, want SRV-3 at 0", worst)
 	}
 }
+

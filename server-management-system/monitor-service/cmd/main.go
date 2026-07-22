@@ -14,7 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vcs-sms/monitor-service/config"
-	"github.com/vcs-sms/monitor-service/internal/database"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/database"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/metrics"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/pinger"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/redisstore"
 	"github.com/vcs-sms/monitor-service/internal/monitor"
 	"github.com/vcs-sms/monitor-service/internal/repository"
 	"github.com/vcs-sms/shared/logger"
@@ -55,17 +58,17 @@ func main() {
 	cancelTemplate()
 
 	registry := prometheus.NewRegistry()
-	metrics := monitor.NewMetrics(registry)
+	mtr := metrics.NewMetrics(registry)
 
-	ops := monitor.NewRedisOps(rdb)
+	ops := redisstore.NewRedisOps(rdb)
 	writer := repository.NewFactWriter(esClient, cfg.ES.IndexPrefix)
-	facts := monitor.NewFactBuffer(writer, cfg.Monitor.FactCapacity, metrics, log)
-	pinger := monitor.NewTCPPinger(
+	facts := monitor.NewFactBuffer(writer, cfg.Monitor.FactCapacity, mtr, log)
+	tcpPinger := pinger.NewTCPPinger(
 		time.Duration(cfg.Monitor.TCPTimeout)*time.Millisecond, cfg.Monitor.TCPDialHost)
 
-	scheduler := monitor.NewScheduler(ops, metrics, log)
-	pool := monitor.NewPool(ops, pinger, facts, metrics, cfg.Monitor.WorkerCount, log)
-	sampler := monitor.NewSampler(ops, metrics)
+	scheduler := monitor.NewScheduler(ops, mtr, log)
+	pool := monitor.NewPool(ops, tcpPinger, facts, mtr, cfg.Monitor.WorkerCount, log)
+	sampler := monitor.NewSampler(ops, mtr)
 
 	// The scheduler competes for the round lock; the pool pings whether or not
 	// this instance wins, so every instance adds ping capacity.

@@ -11,8 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/vcs-sms/auth-service/config"
-	"github.com/vcs-sms/auth-service/internal/database"
 	"github.com/vcs-sms/auth-service/internal/handler"
+	"github.com/vcs-sms/auth-service/internal/infrastructure/database"
 	"github.com/vcs-sms/auth-service/internal/repository"
 	"github.com/vcs-sms/auth-service/internal/service"
 	"github.com/vcs-sms/shared/logger"

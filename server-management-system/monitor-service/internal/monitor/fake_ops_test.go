@@ -3,6 +3,8 @@ package monitor
 import (
 	"context"
 	"errors"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/redisstore"
+	"github.com/vcs-sms/monitor-service/internal/model"
 	"sync"
 	"time"
 )
@@ -15,7 +17,7 @@ type fakeOps struct {
 	now        time.Time
 	ready      bool
 	targetIDs  []string
-	targets    map[string]*Target
+	targets    map[string]*model.Target
 	locksHeld  map[int64]bool
 	queues     map[int64][]string
 	current    int64
@@ -45,14 +47,14 @@ func newFakeOps() *fakeOps {
 	return &fakeOps{
 		now:       time.Unix(1_784_218_260, 0).UTC(),
 		ready:     true,
-		targets:   make(map[string]*Target),
+		targets:   make(map[string]*model.Target),
 		locksHeld: make(map[int64]bool),
 		queues:    make(map[int64][]string),
-		applyCode: statusChanged,
+		applyCode: redisstore.StatusChanged,
 	}
 }
 
-func (f *fakeOps) addTarget(t Target) {
+func (f *fakeOps) addTarget(t model.Target) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.targetIDs = append(f.targetIDs, t.ServerID)
@@ -155,7 +157,7 @@ func (f *fakeOps) PopTarget(ctx context.Context, roundID int64, timeout time.Dur
 	return id, nil
 }
 
-func (f *fakeOps) GetTarget(ctx context.Context, serverID string) (*Target, error) {
+func (f *fakeOps) GetTarget(ctx context.Context, serverID string) (*model.Target, error) {
 	if f.targetErr != nil {
 		return nil, f.targetErr
 	}
@@ -164,7 +166,7 @@ func (f *fakeOps) GetTarget(ctx context.Context, serverID string) (*Target, erro
 	return f.targets[serverID], nil
 }
 
-func (f *fakeOps) ApplyStatus(ctx context.Context, t Target, status, checkedAt string, latencyMs int, roundID int64) (int, error) {
+func (f *fakeOps) ApplyStatus(ctx context.Context, t model.Target, status, checkedAt string, latencyMs int, roundID int64) (int, error) {
 	if f.applyErr != nil {
 		return 0, f.applyErr
 	}
@@ -207,19 +209,19 @@ func (p *fakePinger) Ping(ctx context.Context, ipv4 string, tcpPort int) (bool, 
 // fakeSink collects the facts a check produces.
 type fakeSink struct {
 	mu    sync.Mutex
-	facts []Fact
+	facts []model.Fact
 }
 
-func (s *fakeSink) Add(f Fact) {
+func (s *fakeSink) Add(f model.Fact) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.facts = append(s.facts, f)
 }
 
-func (s *fakeSink) all() []Fact {
+func (s *fakeSink) all() []model.Fact {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]Fact(nil), s.facts...)
+	return append([]model.Fact(nil), s.facts...)
 }
 
 var errBoom = errors.New("boom")

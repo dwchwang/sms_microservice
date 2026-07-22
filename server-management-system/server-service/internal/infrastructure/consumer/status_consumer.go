@@ -11,7 +11,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
-	"github.com/vcs-sms/server-service/internal/cache"
+	"github.com/vcs-sms/server-service/internal/infrastructure/cache"
 	"github.com/vcs-sms/server-service/internal/repository"
 )
 

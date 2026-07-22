@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vcs-sms/report-service/internal/dto"
-	"github.com/vcs-sms/report-service/internal/email"
+	"github.com/vcs-sms/report-service/internal/infrastructure/email"
 	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/service"
 	apperrors "github.com/vcs-sms/shared/errors"

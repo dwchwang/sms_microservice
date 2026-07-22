@@ -1,12 +1,12 @@
-package monitor
+package redisstore
 
 import "github.com/redis/go-redis/v9"
 
 // Return codes from statusScript.
 const (
-	statusSkippedStale = 0 // an older or replayed round; nothing written
-	statusChanged      = 1 // written, and status.changed published
-	statusUnchanged    = 2 // written, same status as before
+	StatusSkippedStale = 0 // an older or replayed round; nothing written
+	StatusChanged      = 1 // written, and status.changed published
+	StatusUnchanged    = 2 // written, same status as before
 )
 
 // statusScript writes current status and publishes status.changed in one step,

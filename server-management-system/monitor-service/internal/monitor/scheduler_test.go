@@ -8,29 +8,31 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/vcs-sms/monitor-service/internal/infrastructure/redisstore"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
-func newTestScheduler(ops RedisOps) *Scheduler {
+func newTestScheduler(ops redisstore.RedisOps) *Scheduler {
 	return NewScheduler(ops, nil, zerolog.New(io.Discard))
 }
 
 func TestRoundID_BucketsByMinute(t *testing.T) {
 	base := time.Unix(1_784_218_260, 0).UTC() // exactly on a minute boundary
-	round := RoundID(base)
+	round := model.RoundID(base)
 
-	if got := RoundID(base.Add(59 * time.Second)); got != round {
+	if got := model.RoundID(base.Add(59 * time.Second)); got != round {
 		t.Errorf("59s later = %d, want the same round %d", got, round)
 	}
-	if got := RoundID(base.Add(60 * time.Second)); got != round+1 {
+	if got := model.RoundID(base.Add(60 * time.Second)); got != round+1 {
 		t.Errorf("60s later = %d, want %d", got, round+1)
 	}
 }
 
 func TestTick_LoadsQueueAndPublishesRound(t *testing.T) {
 	ops := newFakeOps()
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
-	ops.addTarget(Target{ServerID: "SRV-002", IPv4: "10.0.0.2", TCPPort: 80})
-	round := RoundID(ops.now)
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	ops.addTarget(model.Target{ServerID: "SRV-002", IPv4: "10.0.0.2", TCPPort: 80})
+	round := model.RoundID(ops.now)
 
 	newTestScheduler(ops).tick(context.Background())
 
@@ -46,9 +48,9 @@ func TestTick_LoadsQueueAndPublishesRound(t *testing.T) {
 // could see the new round and find nothing to do.
 func TestTick_PublishesRoundOnlyAfterLoading(t *testing.T) {
 	ops := newFakeOps()
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
 	ops.pushErr = errBoom
-	round := RoundID(ops.now)
+	round := model.RoundID(ops.now)
 
 	newTestScheduler(ops).tick(context.Background())
 
@@ -60,8 +62,8 @@ func TestTick_PublishesRoundOnlyAfterLoading(t *testing.T) {
 // Losing the lock is the normal case for all but one instance.
 func TestTick_DoesNothingWithoutTheLock(t *testing.T) {
 	ops := newFakeOps()
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
-	round := RoundID(ops.now)
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	round := model.RoundID(ops.now)
 	ops.locksHeld[round] = true // another instance already won
 
 	newTestScheduler(ops).tick(context.Background())
@@ -78,8 +80,8 @@ func TestTick_DoesNothingWithoutTheLock(t *testing.T) {
 func TestTick_SkipsRoundWhenProjectionNotReady(t *testing.T) {
 	ops := newFakeOps()
 	ops.ready = false
-	ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
-	round := RoundID(ops.now)
+	ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+	round := model.RoundID(ops.now)
 
 	newTestScheduler(ops).tick(context.Background())
 
@@ -95,9 +97,9 @@ func TestTick_PushesInBatches(t *testing.T) {
 	ops := newFakeOps()
 	total := pushBatch*2 + 7
 	for i := range total {
-		ops.addTarget(Target{ServerID: fmt.Sprintf("SRV-%05d", i), IPv4: "10.0.0.1", TCPPort: 80})
+		ops.addTarget(model.Target{ServerID: fmt.Sprintf("SRV-%05d", i), IPv4: "10.0.0.1", TCPPort: 80})
 	}
-	round := RoundID(ops.now)
+	round := model.RoundID(ops.now)
 
 	newTestScheduler(ops).tick(context.Background())
 
@@ -121,7 +123,7 @@ func TestTick_SurvivesRedisErrors(t *testing.T) {
 
 	for name, brk := range cases {
 		ops := newFakeOps()
-		ops.addTarget(Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
+		ops.addTarget(model.Target{ServerID: "SRV-001", IPv4: "10.0.0.1", TCPPort: 80})
 		brk(ops)
 
 		newTestScheduler(ops).tick(context.Background()) // must not panic
@@ -154,7 +156,7 @@ func TestSleepToNextRound_AlignsToBoundary(t *testing.T) {
 		offset int64 // seconds into the round
 		want   time.Duration
 	}{
-		{offset: 0, want: RoundSeconds * time.Second},
+		{offset: 0, want: model.RoundSeconds * time.Second},
 		{offset: 1, want: 59 * time.Second},
 		{offset: 37, want: 23 * time.Second},
 		{offset: 59, want: 1 * time.Second},
@@ -162,7 +164,7 @@ func TestSleepToNextRound_AlignsToBoundary(t *testing.T) {
 
 	for _, tc := range cases {
 		ops := newFakeOps()
-		ops.now = time.Unix(29_737_890*RoundSeconds+tc.offset, 0).UTC()
+		ops.now = time.Unix(29_737_890*model.RoundSeconds+tc.offset, 0).UTC()
 		s := newTestScheduler(ops)
 
 		got := s.nextRoundDelay(context.Background())
@@ -178,7 +180,7 @@ func TestSleepToNextRound_FallsBackWhenRedisTimeFails(t *testing.T) {
 	ops.timeErr = errBoom
 	s := newTestScheduler(ops)
 
-	if got := s.nextRoundDelay(context.Background()); got != RoundSeconds*time.Second {
-		t.Errorf("delay = %v, want %v", got, RoundSeconds*time.Second)
+	if got := s.nextRoundDelay(context.Background()); got != model.RoundSeconds*time.Second {
+		t.Errorf("delay = %v, want %v", got, model.RoundSeconds*time.Second)
 	}
 }

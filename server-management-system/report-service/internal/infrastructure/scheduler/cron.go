@@ -8,9 +8,9 @@ import (
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog"
 	"github.com/vcs-sms/report-service/internal/dto"
+	"github.com/vcs-sms/report-service/internal/infrastructure/snapshot"
 	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/service"
-	"github.com/vcs-sms/report-service/internal/snapshot"
 )
 
 // Scheduler runs the two daily jobs.

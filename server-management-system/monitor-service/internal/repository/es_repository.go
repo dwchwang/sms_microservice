@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/vcs-sms/monitor-service/internal/monitor"
+	"github.com/vcs-sms/monitor-service/internal/model"
 )
 
 // Doc is one health fact as stored in Elasticsearch.
@@ -25,7 +25,7 @@ type Doc struct {
 
 // FactWriter writes a batch of health facts.
 type FactWriter interface {
-	Write(ctx context.Context, facts []monitor.Fact) error
+	Write(ctx context.Context, facts []model.Fact) error
 }
 
 type esFactWriter struct {
@@ -50,7 +50,7 @@ func DocID(serverID string, roundID int64) string {
 
 // Write bulk-indexes the facts. Documents carry a deterministic _id, so the
 // whole call is safe to retry.
-func (w *esFactWriter) Write(ctx context.Context, facts []monitor.Fact) error {
+func (w *esFactWriter) Write(ctx context.Context, facts []model.Fact) error {
 	if len(facts) == 0 {
 		return nil
 	}
