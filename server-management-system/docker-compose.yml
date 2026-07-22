@@ -80,11 +80,13 @@ services:
     container_name: vcs-sms-tcp-simulator
     networks:
       - vcs-network
+    # Substituted from .env, not env_file: the simulator has no business
+    # reading the database, JWT and SMTP secrets the services need.
     environment:
-      - SIMULATOR_BASE_PORT=9001
-      - SIMULATOR_NUM_SERVERS=10000
-      - SIMULATOR_TICK_INTERVAL=30s
-      - SIMULATOR_DEFAULT_UPTIME_RATE=0.75
+      - SIMULATOR_BASE_PORT=${SIMULATOR_BASE_PORT:-9001}
+      - SIMULATOR_NUM_SERVERS=${SIMULATOR_NUM_SERVERS:-10000}
+      - SIMULATOR_TICK_INTERVAL=${SIMULATOR_TICK_INTERVAL:-30s}
+      - SIMULATOR_DEFAULT_UPTIME_RATE=${SIMULATOR_DEFAULT_UPTIME_RATE:-0.95}
     deploy:
       resources:
         limits:
