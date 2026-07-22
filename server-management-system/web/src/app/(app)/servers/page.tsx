@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, Suspense, useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -42,14 +42,16 @@ import { DeleteServerDialog } from "@/components/servers/delete-server-dialog";
 import { ImportDialog } from "@/components/servers/import-dialog";
 import { ExportButton } from "@/components/servers/export-button";
 
-const SORTABLE = [
-  ["server_id", "ID"],
-  ["server_name", "Tên server"],
-  ["status", "Trạng thái"],
-  ["ipv4", "IPv4"],
-  ["location", "Vị trí"],
-  ["created_at", "Ngày tạo"],
-  ["updated_at", "Cập nhật gần nhất"],
+// Status is deliberately not sortable: the tabs above already filter by it.
+const COLUMNS = [
+  { key: "server_id", label: "ID", sortable: true },
+  { key: "server_name", label: "Tên server", sortable: true },
+  { key: "status", label: "Trạng thái", sortable: false },
+  { key: "ipv4", label: "IPv4", sortable: true },
+  { key: "tcp_port", label: "Port", sortable: true },
+  { key: "location", label: "Vị trí", sortable: true },
+  { key: "created_at", label: "Ngày tạo", sortable: true },
+  { key: "updated_at", label: "Cập nhật gần nhất", sortable: true },
 ] as const;
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
@@ -249,50 +251,48 @@ function ServersView() {
         <Table>
           <TableHeader>
             <TableRow>
-              {SORTABLE.map(([col, label]) => (
-                <Fragment key={col}>
-                <TableHead
-                  role="button"
-                  tabIndex={0}
-                  title={`Sắp xếp theo ${label}`}
-                  aria-sort={
-                    sortBy === col
-                      ? sortOrder === "asc"
-                        ? "ascending"
-                        : "descending"
-                      : "none"
-                  }
-                  onClick={() => toggleSort(col)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      toggleSort(col);
+              {COLUMNS.map(({ key, label, sortable }) =>
+                sortable ? (
+                  // aria-sort stays on the th, whose implicit role is
+                  // columnheader; a real button inside supplies the activation,
+                  // so Enter, Space and focus all come from the platform.
+                  <TableHead
+                    key={key}
+                    aria-sort={
+                      sortBy === key
+                        ? sortOrder === "asc"
+                          ? "ascending"
+                          : "descending"
+                        : "none"
                     }
-                  }}
-                  className="cursor-pointer select-none hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-link"
-                >
-                  <div className="group flex h-9 w-full items-center justify-between gap-2 whitespace-nowrap text-left">
-                    <span>{label}</span>
-                    <span className="grid size-4 place-items-center">
-                      {sortBy === col ? (
-                        sortOrder === "asc" ? (
-                          <ArrowUp className="size-3.5 text-ink" />
+                    className="p-0"
+                  >
+                    <button
+                      type="button"
+                      title={`Sắp xếp theo ${label}`}
+                      onClick={() => toggleSort(key)}
+                      className="group flex h-9 w-full cursor-pointer select-none items-center justify-between gap-2 whitespace-nowrap px-3 text-left hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-link"
+                    >
+                      <span>{label}</span>
+                      <span className="grid size-4 place-items-center">
+                        {sortBy === key ? (
+                          sortOrder === "asc" ? (
+                            <ArrowUp className="size-3.5 text-ink" />
+                          ) : (
+                            <ArrowDown className="size-3.5 text-ink" />
+                          )
                         ) : (
-                          <ArrowDown className="size-3.5 text-ink" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="size-3.5 opacity-35 group-hover:opacity-80" />
-                      )}
-                    </span>
-                  </div>
-                </TableHead>
-                {col === "ipv4" ? (
-                  <TableHead>
-                    <span className="flex h-9 items-center whitespace-nowrap">Port</span>
+                          <ArrowUpDown className="size-3.5 opacity-35 group-hover:opacity-80" />
+                        )}
+                      </span>
+                    </button>
                   </TableHead>
-                ) : null}
-                </Fragment>
-              ))}
+                ) : (
+                  <TableHead key={key}>
+                    <span className="flex h-9 items-center whitespace-nowrap">{label}</span>
+                  </TableHead>
+                ),
+              )}
               <TableHead className="text-right">Thao tác</TableHead>
             </TableRow>
           </TableHeader>

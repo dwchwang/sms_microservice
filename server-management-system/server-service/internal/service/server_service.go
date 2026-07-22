@@ -9,12 +9,12 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
-	"github.com/vcs-sms/server-service/internal/cache"
 	"github.com/vcs-sms/server-service/internal/dto"
+	"github.com/vcs-sms/server-service/internal/infrastructure/cache"
+	"github.com/vcs-sms/server-service/internal/infrastructure/projection"
+	"github.com/vcs-sms/server-service/internal/infrastructure/status"
 	"github.com/vcs-sms/server-service/internal/model"
-	"github.com/vcs-sms/server-service/internal/projection"
 	"github.com/vcs-sms/server-service/internal/repository"
-	"github.com/vcs-sms/server-service/internal/status"
 	"github.com/vcs-sms/server-service/internal/validator"
 	"gorm.io/gorm"
 )

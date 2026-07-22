@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
-	"github.com/vcs-sms/server-service/internal/excel"
+	"github.com/vcs-sms/server-service/internal/infrastructure/excel"
 	"github.com/vcs-sms/server-service/internal/model"
 	"github.com/vcs-sms/server-service/internal/repository"
 	"gorm.io/gorm"

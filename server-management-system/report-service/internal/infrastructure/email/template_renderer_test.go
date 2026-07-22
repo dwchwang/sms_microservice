@@ -57,12 +57,22 @@ func TestRender_LabelsTheOnOffSnapshotTime(t *testing.T) {
 	}
 }
 
-func TestRender_ShowsUptimeDistributionAndCoverage(t *testing.T) {
+func TestRender_ShowsCoverage(t *testing.T) {
 	_, html := render(t, summary())
 
-	for _, want := range []string{"9.512", "428", "Không có dữ liệu", "99.8%"} {
-		if !strings.Contains(html, want) {
-			t.Errorf("email is missing %q", want)
+	if !strings.Contains(html, "99.8%") {
+		t.Error("email is missing the coverage percentage")
+	}
+}
+
+// The uptime distribution was dropped from the report: the brief asks for
+// average uptime and the worst servers, not a breakdown by bucket.
+func TestRender_OmitsUptimeDistribution(t *testing.T) {
+	_, html := render(t, summary())
+
+	for _, unwanted := range []string{"Phân bố uptime", "Uptime một phần", "Không có dữ liệu"} {
+		if strings.Contains(html, unwanted) {
+			t.Errorf("email still renders %q", unwanted)
 		}
 	}
 }

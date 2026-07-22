@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/vcs-sms/server-service/internal/dto"
+	"github.com/vcs-sms/server-service/internal/infrastructure/projection"
 	"github.com/vcs-sms/server-service/internal/model"
-	"github.com/vcs-sms/server-service/internal/projection"
 	"github.com/vcs-sms/server-service/internal/repository"
 	"github.com/vcs-sms/server-service/internal/validator"
 	"gorm.io/gorm"

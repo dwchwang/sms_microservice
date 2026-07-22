@@ -372,3 +372,51 @@ func TestServerRepository_ApplyStatusEvent_StaleReturnsZeroRows(t *testing.T) {
 		t.Errorf("rows = %d, want 0 for a stale event", rows)
 	}
 }
+
+// tcp_port joined the allowlist so the servers table can sort by port.
+func TestServerRepository_FindAll_SortsByTCPPort(t *testing.T) {
+	db, mock := setupServerTestDB(t)
+	repo := NewServerRepository(db)
+
+	rows := sqlmock.NewRows([]string{"id", "server_id", "server_name", "status", "ipv4", "tcp_port", "os", "cpu_cores", "ram_gb", "disk_gb", "location", "description", "created_at", "updated_at", "deleted_at"}).
+		AddRow(uuid.New(), "SRV-001", "web-01", "ON", "10.0.0.1", 22, "Ubuntu", nil, nil, nil, "HN", "", nil, nil, nil)
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "servers" WHERE "servers"."deleted_at" IS NULL`)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT * FROM "servers" WHERE "servers"."deleted_at" IS NULL ORDER BY tcp_port ASC LIMIT $1`)).
+		WithArgs(20).
+		WillReturnRows(rows)
+
+	if _, _, err := repo.FindAll(context.Background(), &dto.ServerFilter{
+		SortBy: "tcp_port", SortOrder: "asc", Page: 1, PageSize: 20,
+	}); err != nil {
+		t.Fatalf("FindAll failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("tcp_port was not used as the ORDER BY column: %v", err)
+	}
+}
+
+// The allowlist is the guard against SQL injection through sort_by, so anything
+// outside it must fall back rather than reach the query.
+func TestServerRepository_FindAll_RejectsUnknownSortField(t *testing.T) {
+	db, mock := setupServerTestDB(t)
+	repo := NewServerRepository(db)
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT count(*) FROM "servers" WHERE "servers"."deleted_at" IS NULL`)).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(regexp.QuoteMeta(
+		`SELECT * FROM "servers" WHERE "servers"."deleted_at" IS NULL ORDER BY created_at DESC LIMIT $1`)).
+		WithArgs(20).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+
+	if _, _, err := repo.FindAll(context.Background(), &dto.ServerFilter{
+		SortBy: "tcp_port; DROP TABLE servers--", Page: 1, PageSize: 20,
+	}); err != nil {
+		t.Fatalf("FindAll failed: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("an unknown sort field was not rejected: %v", err)
+	}
+}

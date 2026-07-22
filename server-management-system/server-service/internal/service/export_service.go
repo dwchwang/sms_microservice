@@ -6,9 +6,9 @@ import (
 	"fmt"
 
 	"github.com/vcs-sms/server-service/internal/dto"
-	"github.com/vcs-sms/server-service/internal/excel"
+	"github.com/vcs-sms/server-service/internal/infrastructure/excel"
+	"github.com/vcs-sms/server-service/internal/infrastructure/status"
 	"github.com/vcs-sms/server-service/internal/repository"
-	"github.com/vcs-sms/server-service/internal/status"
 )
 
 // Matches the page size cap FindAll enforces; a larger value is silently clamped.

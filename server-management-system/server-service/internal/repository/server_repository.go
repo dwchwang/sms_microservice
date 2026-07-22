@@ -127,7 +127,8 @@ func (r *serverRepository) FindAll(ctx context.Context, filter *dto.ServerFilter
 	sortOrder := "DESC"
 	allowedSortFields := map[string]bool{
 		"server_id": true, "server_name": true, "status": true,
-		"ipv4": true, "location": true, "created_at": true, "updated_at": true,
+		"ipv4": true, "tcp_port": true, "location": true,
+		"created_at": true, "updated_at": true,
 	}
 	if filter.SortBy != "" && allowedSortFields[filter.SortBy] {
 		sortBy = filter.SortBy

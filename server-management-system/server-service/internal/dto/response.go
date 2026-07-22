@@ -3,7 +3,7 @@ package dto
 import (
 	"time"
 
-	"github.com/vcs-sms/server-service/internal/status"
+	"github.com/vcs-sms/server-service/internal/infrastructure/status"
 )
 
 // ServerResponse is the public representation of a server.

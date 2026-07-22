@@ -19,7 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { StatusDonut, UptimeDistributionDonut, LowUptimeBar } from "@/components/reports/charts";
+import { StatusDonut, LowUptimeBar } from "@/components/reports/charts";
 import { SendReportDialog } from "@/components/reports/send-report-dialog";
 
 const REFRESH_MS = 60_000;
@@ -46,7 +46,7 @@ export default function ReportsPage() {
     <div>
       <PageHeader
         title="Dashboard uptime"
-        description="Uptime luỹ kế từ lúc mỗi server bắt đầu được giám sát, cập nhật mỗi phút."
+        description="Uptime trong ngày hôm nay (từ 00:00 giờ Việt Nam), cập nhật mỗi phút."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs text-mute">Cập nhật {lastUpdated}</span>
@@ -100,12 +100,12 @@ export default function ReportsPage() {
               accent="mute"
             />
             <KpiCard
-              label="Uptime trung bình"
+              label="Uptime trung bình hôm nay"
               value={data.avg_uptime_pct === null ? "—" : pct(data.avg_uptime_pct)}
               hint={
                 data.servers_no_data > 0
-                  ? `${numberFmt.format(data.servers_no_data)} server chưa có dữ liệu`
-                  : "Trên toàn bộ server đã đo"
+                  ? `${numberFmt.format(data.servers_no_data)} server chưa được check hôm nay`
+                  : "Trên toàn bộ server đã đo hôm nay"
               }
               accent={
                 data.avg_uptime_pct !== null && data.avg_uptime_pct < 95 ? "warning" : "ink"
@@ -113,37 +113,22 @@ export default function ReportsPage() {
             />
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Trạng thái hiện tại</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <StatusDonut
-                  on={data.servers_on}
-                  off={data.servers_off}
-                  unknown={data.servers_unknown}
-                />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Phân bố uptime luỹ kế</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <UptimeDistributionDonut
-                  full={data.servers_uptime_100}
-                  partial={data.servers_uptime_partial}
-                  zero={data.servers_uptime_0}
-                  noData={data.servers_no_data}
-                />
-              </CardContent>
-            </Card>
-          </div>
+          <Card>
+            <CardHeader>
+              <CardTitle>Trạng thái hiện tại</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <StatusDonut
+                on={data.servers_on}
+                off={data.servers_off}
+                unknown={data.servers_unknown}
+              />
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle>Top 10 server uptime thấp nhất</CardTitle>
+              <CardTitle>Top 10 server uptime thấp nhất hôm nay</CardTitle>
             </CardHeader>
             <CardContent>
               <LowUptimeBar data={top} />
@@ -152,7 +137,7 @@ export default function ReportsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Chi tiết</CardTitle>
+              <CardTitle>Chi tiết hôm nay</CardTitle>
             </CardHeader>
             <CardContent className="pt-0">
               <Table>
@@ -160,7 +145,7 @@ export default function ReportsPage() {
                   <TableRow>
                     <TableHead>Server ID</TableHead>
                     <TableHead>Tên</TableHead>
-                    <TableHead className="text-right">On / Tổng check</TableHead>
+                    <TableHead className="text-right">On / Tổng check hôm nay</TableHead>
                     <TableHead className="text-right">Uptime</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -189,7 +174,7 @@ export default function ReportsPage() {
                   ) : (
                     <TableRow>
                       <TableCell colSpan={4} className="py-8 text-center text-mute">
-                        Chưa có server nào được check
+                        Chưa có server nào được check hôm nay
                       </TableCell>
                     </TableRow>
                   )}
