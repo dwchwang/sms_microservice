@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/viper"
+	"github.com/vcs-sms/shared/pkg/confighelper"
 )
 
 // Config holds all configuration for the server service.
@@ -113,14 +114,14 @@ func LoadConfig() *Config {
 			Host:     viper.GetString("SERVER_DB_HOST"),
 			Port:     viper.GetInt("SERVER_DB_PORT"),
 			User:     viper.GetString("SERVER_DB_USER"),
-			Password: viper.GetString("SERVER_DB_PASSWORD"),
+			Password: confighelper.GetStringSecret("SERVER_DB_PASSWORD", viper.GetString("SERVER_DB_PASSWORD")),
 			Name:     viper.GetString("SERVER_DB_NAME"),
 			SSLMode:  viper.GetString("SERVER_DB_SSLMODE"),
 		},
 		Redis: RedisConfig{
 			Host:     viper.GetString("REDIS_HOST"),
 			Port:     viper.GetString("REDIS_PORT"),
-			Password: viper.GetString("REDIS_PASSWORD"),
+			Password: confighelper.GetStringSecret("REDIS_PASSWORD", viper.GetString("REDIS_PASSWORD")),
 			DB:       viper.GetInt("REDIS_DB"),
 		},
 		Log: LogConfig{

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/vcs-sms/shared/pkg/confighelper"
 )
 
 // ReportTimezone is the zone report dates are interpreted in.
@@ -151,21 +152,21 @@ func LoadConfig() *Config {
 			Host:     viper.GetString("REPORT_DB_HOST"),
 			Port:     viper.GetInt("REPORT_DB_PORT"),
 			User:     viper.GetString("REPORT_DB_USER"),
-			Password: viper.GetString("REPORT_DB_PASSWORD"),
+			Password: confighelper.GetStringSecret("REPORT_DB_PASSWORD", viper.GetString("REPORT_DB_PASSWORD")),
 			Name:     viper.GetString("REPORT_DB_NAME"),
 			SSLMode:  viper.GetString("REPORT_DB_SSLMODE"),
 		},
 		ES: ESConfig{
 			Addresses:   viper.GetString("ES_ADDRESSES"),
 			Username:    viper.GetString("ES_USERNAME"),
-			Password:    viper.GetString("ES_PASSWORD"),
+			Password:    confighelper.GetStringSecret("ES_PASSWORD", viper.GetString("ES_PASSWORD")),
 			IndexPrefix: viper.GetString("ES_INDEX_PREFIX"),
 		},
 		SMTP: SMTPConfig{
 			Host:             viper.GetString("SMTP_HOST"),
 			Port:             viper.GetInt("SMTP_PORT"),
 			Username:         viper.GetString("SMTP_USERNAME"),
-			Password:         viper.GetString("SMTP_PASSWORD"),
+			Password:         confighelper.GetStringSecret("SMTP_PASSWORD", viper.GetString("SMTP_PASSWORD")),
 			From:             viper.GetString("SMTP_FROM"),
 			RecipientDomains: viper.GetString("SMTP_RECIPIENT_DOMAINS"),
 		},

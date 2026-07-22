@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/viper"
+	"github.com/vcs-sms/shared/pkg/confighelper"
 )
 
 // Config holds all configuration for the monitor service.
@@ -117,13 +118,13 @@ func LoadConfig() *Config {
 		Redis: RedisConfig{
 			Host:     viper.GetString("REDIS_HOST"),
 			Port:     viper.GetString("REDIS_PORT"),
-			Password: viper.GetString("REDIS_PASSWORD"),
+			Password: confighelper.GetStringSecret("REDIS_PASSWORD", viper.GetString("REDIS_PASSWORD")),
 			DB:       viper.GetInt("REDIS_DB"),
 		},
 		ES: ESConfig{
 			Addresses:   viper.GetString("ES_ADDRESSES"),
 			Username:    viper.GetString("ES_USERNAME"),
-			Password:    viper.GetString("ES_PASSWORD"),
+			Password:    confighelper.GetStringSecret("ES_PASSWORD", viper.GetString("ES_PASSWORD")),
 			IndexPrefix: viper.GetString("ES_INDEX_PREFIX"),
 		},
 		Monitor: MonitorConfig{

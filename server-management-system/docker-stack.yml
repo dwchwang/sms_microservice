@@ -1,0 +1,217 @@
+version: '3.8'
+
+secrets:
+  postgres_password:
+    external: true
+  redis_password:
+    external: true
+  jwt_secret:
+    external: true
+  smtp_password:
+    external: true
+
+services:
+  # ═══════════════════════════════════════
+  # Infrastructure
+  # ═══════════════════════════════════════
+  
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: vcs_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: vcs_sms
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deployments/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./deployments/docker/postgres/seed_10k_servers.sql:/seed/seed_10k_servers.sql:ro
+    secrets:
+      - postgres_password
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+  redis:
+    image: redis:8-alpine
+    # Wrap entrypoint to read secret for requirepass
+    command: >
+      sh -c 'redis-server --requirepass "$$(cat /run/secrets/redis_password)"
+      --maxmemory 512mb --maxmemory-policy volatile-lru
+      --appendonly yes --appendfsync everysec'
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    secrets:
+      - redis_password
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=vcs-sms-cluster
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+
+  # ═══════════════════════════════════════
+  # TCP Simulator
+  # ═══════════════════════════════════════
+
+  tcp-simulator:
+    image: vcs-sms-tcp-simulator:latest
+    networks:
+      - vcs-network
+    environment:
+      - SIMULATOR_BASE_PORT=9001
+      - SIMULATOR_NUM_SERVERS=10000
+      - SIMULATOR_TICK_INTERVAL=30s
+      - SIMULATOR_DEFAULT_UPTIME_RATE=0.95
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1.0'
+
+  # ═══════════════════════════════════════
+  # Application Services
+  # ═══════════════════════════════════════
+
+  traefik:
+    image: traefik:v3.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./deployments/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./deployments/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./logs/traefik:/var/log/traefik
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+  auth-service:
+    image: vcs-sms-auth:latest
+    environment:
+      IDENTITY_DB_HOST: postgres
+      IDENTITY_DB_PORT: 5432
+      IDENTITY_DB_USER: identity_user
+      IDENTITY_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      IDENTITY_DB_NAME: identity_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+    secrets:
+      - postgres_password
+      - redis_password
+      - jwt_secret
+    volumes:
+      - ./logs/auth:/var/log/vcs-sms
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+
+  server-service:
+    image: vcs-sms-server:latest
+    environment:
+      SERVER_DB_HOST: postgres
+      SERVER_DB_PORT: 5432
+      SERVER_DB_USER: server_user_v2
+      SERVER_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      SERVER_DB_NAME: server_db
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      SERVER_CIDR_ALLOWLIST: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    secrets:
+      - postgres_password
+      - redis_password
+    volumes:
+      - ./logs/server:/var/log/vcs-sms
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+
+  monitor-service:
+    image: vcs-sms-monitor:latest
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      ES_ADDRESSES: http://elasticsearch:9200
+      MONITOR_TCP_DIAL_HOST: tcp-simulator
+      MONITOR_WORKER_COUNT: 200
+    secrets:
+      - redis_password
+    volumes:
+      - ./logs/monitor:/var/log/vcs-sms
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+
+  report-service:
+    image: vcs-sms-report:latest
+    environment:
+      REPORT_DB_HOST: postgres
+      REPORT_DB_PORT: 5432
+      REPORT_DB_USER: report_user_v2
+      REPORT_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REPORT_DB_NAME: report_db
+      ES_ADDRESSES: http://elasticsearch:9200
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: 587
+      SMTP_USERNAME: your-email@gmail.com
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      SERVER_INTERNAL_URL: http://server-service:8082
+    secrets:
+      - postgres_password
+      - smtp_password
+    volumes:
+      - ./logs/report:/var/log/vcs-sms
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+
+  web:
+    image: vcs-sms-web:latest
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8080/api/v1"
+    ports:
+      - "3000:3000"
+    networks:
+      - vcs-network
+    deploy:
+      replicas: 1
+
+volumes:
+  postgres_data:
+  redis_data:
+  es_data:
+
+networks:
+  vcs-network:
+    driver: overlay

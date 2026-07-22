@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/vcs-sms/shared/pkg/confighelper"
 )
 
 // Config holds all configuration for the auth service.
@@ -127,18 +128,18 @@ func LoadConfig() *Config {
 			Host:     viper.GetString("IDENTITY_DB_HOST"),
 			Port:     viper.GetString("IDENTITY_DB_PORT"),
 			User:     viper.GetString("IDENTITY_DB_USER"),
-			Password: viper.GetString("IDENTITY_DB_PASSWORD"),
+			Password: confighelper.GetStringSecret("IDENTITY_DB_PASSWORD", viper.GetString("IDENTITY_DB_PASSWORD")),
 			DBName:   viper.GetString("IDENTITY_DB_NAME"),
 			SSLMode:  viper.GetString("IDENTITY_DB_SSLMODE"),
 		},
 		Redis: RedisConfig{
 			Host:     viper.GetString("REDIS_HOST"),
 			Port:     viper.GetString("REDIS_PORT"),
-			Password: viper.GetString("REDIS_PASSWORD"),
+			Password: confighelper.GetStringSecret("REDIS_PASSWORD", viper.GetString("REDIS_PASSWORD")),
 			DB:       viper.GetInt("REDIS_DB"),
 		},
 		JWT: JWTConfig{
-			Secret:              viper.GetString("JWT_SECRET"),
+			Secret:              confighelper.GetStringSecret("JWT_SECRET", viper.GetString("JWT_SECRET")),
 			AccessExpiryMinutes: viper.GetInt("JWT_ACCESS_EXPIRY_MINUTES"),
 			RefreshExpiryDays:   viper.GetInt("JWT_REFRESH_EXPIRY_DAYS"),
 		},
