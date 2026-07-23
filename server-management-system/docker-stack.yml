@@ -82,14 +82,14 @@ services:
   # ═══════════════════════════════════════
 
   tcp-simulator:
-    image: baohoang2411/vcs-sms-tcp-simulator:latest
+    image: baohoang2411/vcs-sms-tcp-simulator:1.0.0
     networks:
       - vcs-network
     environment:
       - SIMULATOR_BASE_PORT=9001
       - SIMULATOR_NUM_SERVERS=10000
       - SIMULATOR_TICK_INTERVAL=30s
-      - SIMULATOR_DEFAULT_UPTIME_RATE=0.95
+      - SIMULATOR_DEFAULT_UPTIME_RATE=0.80
     deploy:
       replicas: 1
       resources:
@@ -118,7 +118,7 @@ services:
         constraints: [node.role == manager]
 
   auth-service:
-    image: baohoang2411/vcs-sms-auth:latest
+    image: baohoang2411/vcs-sms-auth:1.0.0
     environment:
       IDENTITY_DB_HOST: postgres
       IDENTITY_DB_PORT: 5432
@@ -142,7 +142,7 @@ services:
       replicas: 1
 
   server-service:
-    image: baohoang2411/vcs-sms-server:latest
+    image: baohoang2411/vcs-sms-server:1.0.0
     environment:
       SERVER_DB_HOST: postgres
       SERVER_DB_PORT: 5432
@@ -163,7 +163,7 @@ services:
       replicas: 1
 
   monitor-service:
-    image: baohoang2411/vcs-sms-monitor:latest
+    image: baohoang2411/vcs-sms-monitor:1.0.0
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -180,7 +180,7 @@ services:
       replicas: 1
 
   report-service:
-    image: baohoang2411/vcs-sms-report:latest
+    image: baohoang2411/vcs-sms-report:1.0.0
     environment:
       REPORT_DB_HOST: postgres
       REPORT_DB_PORT: 5432
@@ -208,7 +208,7 @@ services:
       replicas: 1
 
   web:
-    image: baohoang2411/vcs-sms-web:latest
+    image: baohoang2411/vcs-sms-web:1.0.3
     environment:
       NEXT_PUBLIC_API_BASE_URL: "http://localhost:8080/api/v1"
     ports:

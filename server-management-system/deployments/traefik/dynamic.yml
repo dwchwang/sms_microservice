@@ -10,6 +10,10 @@ http:
       headers:
         accessControlAllowOriginList:
           - "http://localhost:3000"
+          - "http://192.168.8.131:3000"
+        # Cho phép mọi node trong dải LAN truy cập web:3000 (điều chỉnh dải cho đúng mạng).
+        accessControlAllowOriginListRegex:
+          - '^http://192\.168\.8\.[0-9]+:3000$'
         accessControlAllowMethods:
           - "GET"
           - "POST"

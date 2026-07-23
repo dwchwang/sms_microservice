@@ -22,9 +22,23 @@ import type {
 
 type Env<T> = { data: T };
 
+// crypto.randomUUID() only exists in a secure context (HTTPS or localhost). Served
+// over plain HTTP on a LAN IP it is undefined, so fall back to getRandomValues,
+// which is available everywhere, to build a v4 UUID.
+function uuidV4(): string {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  const b = new Uint8Array(16);
+  c.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 // POST /servers and /servers/import reject a request without this header.
 function idempotencyKey(): Record<string, string> {
-  return { "Idempotency-Key": crypto.randomUUID() };
+  return { "Idempotency-Key": uuidV4() };
 }
 
 // ── Auth ──
@@ -83,6 +97,9 @@ export const fileApi = {
     form.append("file", file);
     return api
       .post<Env<ImportResponse>>("/servers/import", form, {
+        // The axios instance defaults Content-Type to application/json, which would
+        // serialize the FormData to "{}". Override so the browser sends multipart
+        // with the correct boundary.
         headers: { "Content-Type": "multipart/form-data", ...idempotencyKey() },
       })
       .then((r) => unwrap(r.data));
