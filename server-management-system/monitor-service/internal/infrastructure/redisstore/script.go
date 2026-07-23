@@ -11,12 +11,12 @@ const (
 
 // statusScript writes current status and publishes status.changed in one step,
 // so there is no window where Redis and the stream disagree. It also keeps the
-// lifetime check counters, which cost nothing extra here because the script
+// per-day check counters, which cost nothing extra here because the script
 // already writes this key on every check.
 //
 // KEYS[1] monitor:status:{server_id}   KEYS[2] stream:monitor.status
 // KEYS[3] monitor:uptime:index
-// ARGV: server_id, status, checked_at (RFC3339), latency_ms, round_id
+// ARGV: server_id, status, checked_at (RFC3339), latency_ms, round_id, day (VN, YYYY-MM-DD)
 var statusScript = redis.NewScript(`
 local status_key = KEYS[1]
 local stream_key = KEYS[2]
@@ -26,6 +26,7 @@ local new_status = ARGV[2]
 local checked_at = ARGV[3]
 local latency    = ARGV[4]
 local round_id   = tonumber(ARGV[5])
+local day        = ARGV[6]
 
 local old_status = redis.call('HGET', status_key, 'status')
 -- HGET yields false when the field is absent, so a first check reads -1.
@@ -41,11 +42,17 @@ redis.call('HSET', status_key,
   'latency_ms', latency,
   'round_id', round_id)
 
--- Counted after the stale guard, so a replay cannot inflate them.
-local total = redis.call('HINCRBY', status_key, 'total_checks', 1)
-local ons = tonumber(redis.call('HGET', status_key, 'on_checks') or '0')
+-- Per-day uptime counters. They reset the first time a new Vietnam calendar day
+-- is seen, so the dashboard reads "today" and not a lifetime total that AOF
+-- carries across restarts. Counted after the stale guard, so a replay or an
+-- out-of-order round cannot inflate them. (HGET yields false when absent.)
+if redis.call('HGET', status_key, 'day') ~= day then
+  redis.call('HSET', status_key, 'day', day, 'day_total', 0, 'day_on', 0)
+end
+local total = redis.call('HINCRBY', status_key, 'day_total', 1)
+local ons = tonumber(redis.call('HGET', status_key, 'day_on') or '0')
 if new_status == 'ON' then
-  ons = redis.call('HINCRBY', status_key, 'on_checks', 1)
+  ons = redis.call('HINCRBY', status_key, 'day_on', 1)
 end
 redis.call('ZADD', uptime_key, (ons / total) * 100, server_id)
 

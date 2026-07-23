@@ -14,7 +14,7 @@ services:
   # ═══════════════════════════════════════
   # Infrastructure
   # ═══════════════════════════════════════
-  
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -34,6 +34,7 @@ services:
     deploy:
       replicas: 1
       placement:
+        # Named volume + init.sql/seed bind mounts are node-local; keep data on the manager.
         constraints: [node.role == manager]
 
   redis:
@@ -53,6 +54,9 @@ services:
       - vcs-network
     deploy:
       replicas: 1
+      placement:
+        # redis_data (target projection, status, uptime counters) is node-local.
+        constraints: [node.role == manager]
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
@@ -69,13 +73,16 @@ services:
       - vcs-network
     deploy:
       replicas: 1
+      placement:
+        # es_data is node-local; the manager also needs vm.max_map_count=262144.
+        constraints: [node.role == manager]
 
   # ═══════════════════════════════════════
   # TCP Simulator
   # ═══════════════════════════════════════
 
   tcp-simulator:
-    image: vcs-sms-tcp-simulator:latest
+    image: baohoang2411/vcs-sms-tcp-simulator:latest
     networks:
       - vcs-network
     environment:
@@ -107,55 +114,56 @@ services:
     deploy:
       replicas: 1
       placement:
+        # Config files are bind-mounted from the repo, which lives on the manager.
         constraints: [node.role == manager]
 
   auth-service:
-    image: vcs-sms-auth:latest
+    image: baohoang2411/vcs-sms-auth:latest
     environment:
       IDENTITY_DB_HOST: postgres
       IDENTITY_DB_PORT: 5432
       IDENTITY_DB_USER: identity_user
-      IDENTITY_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      # DB user password is fixed by init.sql (not a secret); the service connects
+      # as identity_user, not the postgres superuser.
+      IDENTITY_DB_PASSWORD: identity_pass_secret
       IDENTITY_DB_NAME: identity_db
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       JWT_SECRET_FILE: /run/secrets/jwt_secret
     secrets:
-      - postgres_password
       - redis_password
       - jwt_secret
-    volumes:
-      - ./logs/auth:/var/log/vcs-sms
+    # Logs go to stdout only (docker service logs); no node-local bind mount so the
+    # service can run on any node.
     networks:
       - vcs-network
     deploy:
       replicas: 1
 
   server-service:
-    image: vcs-sms-server:latest
+    image: baohoang2411/vcs-sms-server:latest
     environment:
       SERVER_DB_HOST: postgres
       SERVER_DB_PORT: 5432
       SERVER_DB_USER: server_user_v2
-      SERVER_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      # DB user password is fixed by init.sql (not a secret).
+      SERVER_DB_PASSWORD: server_pass_secret_v2
       SERVER_DB_NAME: server_db
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       SERVER_CIDR_ALLOWLIST: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     secrets:
-      - postgres_password
       - redis_password
-    volumes:
-      - ./logs/server:/var/log/vcs-sms
+    # Logs go to stdout only (docker service logs).
     networks:
       - vcs-network
     deploy:
       replicas: 1
 
   monitor-service:
-    image: vcs-sms-monitor:latest
+    image: baohoang2411/vcs-sms-monitor:latest
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -165,39 +173,42 @@ services:
       MONITOR_WORKER_COUNT: 200
     secrets:
       - redis_password
-    volumes:
-      - ./logs/monitor:/var/log/vcs-sms
+    # Logs go to stdout only (docker service logs).
     networks:
       - vcs-network
     deploy:
       replicas: 1
 
   report-service:
-    image: vcs-sms-report:latest
+    image: baohoang2411/vcs-sms-report:latest
     environment:
       REPORT_DB_HOST: postgres
       REPORT_DB_PORT: 5432
       REPORT_DB_USER: report_user_v2
-      REPORT_DB_PASSWORD_FILE: /run/secrets/postgres_password
+      # DB user password is fixed by init.sql (not a secret).
+      REPORT_DB_PASSWORD: report_pass_secret_v2
       REPORT_DB_NAME: report_db
       ES_ADDRESSES: http://elasticsearch:9200
       SMTP_HOST: smtp.gmail.com
       SMTP_PORT: 587
-      SMTP_USERNAME: your-email@gmail.com
+      SMTP_USERNAME: baohoangbh02411@gmail.com
+      SMTP_FROM: VCS-SMS <baohoangbh02411@gmail.com>
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      SMTP_RECIPIENT_DOMAINS: ""
+      REPORT_DAILY_RECIPIENT: baohoangbh02411@gmail.com
+      REPORT_SNAPSHOT_CRON: "30 9 * * *"
+      REPORT_DAILY_CRON: "0 10 * * *"
       SERVER_INTERNAL_URL: http://server-service:8082
     secrets:
-      - postgres_password
       - smtp_password
-    volumes:
-      - ./logs/report:/var/log/vcs-sms
+    # Logs go to stdout only (docker service logs).
     networks:
       - vcs-network
     deploy:
       replicas: 1
 
   web:
-    image: vcs-sms-web:latest
+    image: baohoang2411/vcs-sms-web:latest
     environment:
       NEXT_PUBLIC_API_BASE_URL: "http://localhost:8080/api/v1"
     ports:

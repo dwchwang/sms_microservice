@@ -20,8 +20,9 @@ const (
 	statusKeyPrefix = "monitor:status:"
 	statusStream    = "stream:monitor.status"
 
-	// uptimeIndexKey scores every server by lifetime uptime %, so the dashboard
-	// gets the distribution with ZCOUNT and the worst servers with ZRANGE.
+	// uptimeIndexKey scores every server by its uptime % for the current Vietnam
+	// day, so the dashboard gets the distribution with ZCOUNT and the worst
+	// servers with ZRANGE. Scores refresh within one round after midnight.
 	uptimeIndexKey = "monitor:uptime:index"
 )
 

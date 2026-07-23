@@ -8,12 +8,14 @@ import (
 )
 
 const (
-	uptimeIndexKey  = "monitor:uptime:index"
-	totalChecksItem = "total_checks"
-	onChecksItem    = "on_checks"
+	uptimeIndexKey = "monitor:uptime:index"
+	dayTotalItem   = "day_total"
+	dayOnItem      = "day_on"
 )
 
-// ServerUptime is one server's lifetime uptime, as counted by Monitoring.
+// ServerUptime is one server's uptime for the current day, as counted by
+// Monitoring. TotalChecks/OnChecks are today's counts; the JSON keys are kept
+// for the frontend contract.
 type ServerUptime struct {
 	ServerID    string  `json:"server_id"`
 	ServerName  string  `json:"server_name"`
@@ -32,7 +34,7 @@ type UptimeStats struct {
 	Worst    []ServerUptime
 }
 
-// UptimeReader reads the lifetime counters Monitoring keeps in Redis.
+// UptimeReader reads the current-day uptime counters Monitoring keeps in Redis.
 type UptimeReader interface {
 	Stats(ctx context.Context, worstN int) (*UptimeStats, error)
 }
@@ -109,7 +111,7 @@ func (r *redisUptimeReader) fillCounts(ctx context.Context, servers []ServerUpti
 	pipe := r.client.Pipeline()
 	cmds := make([]*redis.SliceCmd, len(servers))
 	for i, s := range servers {
-		cmds[i] = pipe.HMGet(ctx, statusKeyPrefix+s.ServerID, totalChecksItem, onChecksItem)
+		cmds[i] = pipe.HMGet(ctx, statusKeyPrefix+s.ServerID, dayTotalItem, dayOnItem)
 	}
 	_, _ = pipe.Exec(ctx)
 

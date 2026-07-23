@@ -8,7 +8,29 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/vcs-sms/monitor-service/internal/model"
+	"github.com/vcs-sms/shared/timezone"
 )
+
+// vnLoc is the zone the daily uptime counters roll over in. The dashboard's
+// "today" is a Vietnam calendar day, so a check at 23:59 UTC already belongs to
+// the next day here.
+var vnLoc = func() *time.Location {
+	loc, err := timezone.Load()
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}()
+
+// vnDay is the Vietnam calendar day of checkedAt, as YYYY-MM-DD. The Lua script
+// resets the day counters whenever this value changes.
+func vnDay(checkedAt string) string {
+	t, err := time.Parse(time.RFC3339, checkedAt)
+	if err != nil {
+		t = time.Now()
+	}
+	return t.In(vnLoc).Format("2006-01-02")
+}
 
 // RedisOps is the Redis surface Monitoring uses.
 type RedisOps interface {
@@ -126,6 +148,6 @@ func (r *redisOps) GetTarget(ctx context.Context, serverID string) (*model.Targe
 func (r *redisOps) ApplyStatus(ctx context.Context, t model.Target, status, checkedAt string, latencyMs int, roundID int64) (int, error) {
 	return statusScript.Run(ctx, r.client,
 		[]string{statusKey(t.ServerID), statusStream, uptimeIndexKey},
-		t.ServerID, status, checkedAt, latencyMs, roundID,
+		t.ServerID, status, checkedAt, latencyMs, roundID, vnDay(checkedAt),
 	).Int()
 }

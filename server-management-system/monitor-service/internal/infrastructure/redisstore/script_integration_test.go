@@ -43,8 +43,8 @@ func counters(t *testing.T, c *redis.Client, id string) (total, ons int, pct flo
 	t.Helper()
 	ctx := context.Background()
 	fields := c.HGetAll(ctx, statusKey(id)).Val()
-	total, _ = strconv.Atoi(fields["total_checks"])
-	ons, _ = strconv.Atoi(fields["on_checks"])
+	total, _ = strconv.Atoi(fields["day_total"])
+	ons, _ = strconv.Atoi(fields["day_on"])
 	pct = c.ZScore(ctx, uptimeIndexKey, id).Val()
 	return
 }
@@ -76,12 +76,12 @@ func TestIntegration_ScriptReturnCodes(t *testing.T) {
 	}
 }
 
-func TestIntegration_CountersTrackLifetimeUptime(t *testing.T) {
+func TestIntegration_CountersTrackDailyUptime(t *testing.T) {
 	ops, c := setupRedis(t)
 	ctx := context.Background()
 	tg := target("SRV-1")
 
-	// 3 ON then 1 OFF -> 3/4 = 75%.
+	// 3 ON then 1 OFF within one day -> 3/4 = 75%.
 	for i, st := range []string{"ON", "ON", "ON", "OFF"} {
 		if _, err := ops.ApplyStatus(ctx, tg, st, "2026-07-17T10:00:00Z", 5, int64(100+i)); err != nil {
 			t.Fatalf("apply %d: %v", i, err)
@@ -94,6 +94,33 @@ func TestIntegration_CountersTrackLifetimeUptime(t *testing.T) {
 	}
 	if pct != 75 {
 		t.Errorf("uptime index score = %v, want 75", pct)
+	}
+}
+
+// A new Vietnam calendar day must reset the counters, so the dashboard shows
+// today and not a total AOF carried across a restart. This locks the fix for
+// the "still shows yesterday after a restart" bug.
+func TestIntegration_DayRolloverResetsCounters(t *testing.T) {
+	ops, c := setupRedis(t)
+	ctx := context.Background()
+	tg := target("SRV-1")
+
+	// Day A: one ON, one OFF -> 1/2 = 50%.
+	ops.ApplyStatus(ctx, tg, "ON", "2026-07-17T10:00:00Z", 5, 100)
+	ops.ApplyStatus(ctx, tg, "OFF", "2026-07-17T11:00:00Z", 5, 101)
+	if total, ons, pct := counters(t, c, "SRV-1"); total != 2 || ons != 1 || pct != 50 {
+		t.Fatalf("day A: total/on/pct = %d/%d/%v, want 2/1/50", total, ons, pct)
+	}
+
+	// Day B: first check resets the counters to today only.
+	ops.ApplyStatus(ctx, tg, "ON", "2026-07-18T10:00:00Z", 5, 102)
+
+	if got := c.HGet(ctx, statusKey("SRV-1"), "day").Val(); got != "2026-07-18" {
+		t.Errorf("day field = %q, want 2026-07-18", got)
+	}
+	total, ons, pct := counters(t, c, "SRV-1")
+	if total != 1 || ons != 1 || pct != 100 {
+		t.Errorf("day B: total/on/pct = %d/%d/%v, want 1/1/100 — counters did not reset", total, ons, pct)
 	}
 }
 
