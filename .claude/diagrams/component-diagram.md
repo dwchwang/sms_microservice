@@ -45,76 +45,34 @@ graph TB
 
 ## 2. server-service — `:8082` (service phức tạp nhất)
 
+Service này chạy **ba dòng độc lập** cùng lúc. Vẽ tách theo dòng cho dễ đọc:
+
 ```mermaid
-graph TB
-    subgraph HTTP["Gin router · ForwardAuth + RequireScope"]
-        MW["Idempotency middleware<br/>bọc các POST tạo dữ liệu"]
-        H1["ServerHandler<br/>CRUD · stats · uptime"]
-        H2["ImportHandler POST /import"]
-        H3["ExportHandler POST /export"]
-        H4["InternalHandler<br/>GET /internal/servers"]
+graph LR
+    subgraph F1["① HTTP · người dùng"]
+        H["Handlers<br/>CRUD · Import · Export · /internal"]
+        S["Services<br/>+ validator/CIDR · excel · cache"]
+        H --> S
     end
 
-    subgraph SVC["internal/service"]
-        S1["ServerService"]
-        S2["ImportService<br/>validate → lọc trùng → chèn hàng loạt"]
-        S3["ExportService"]
+    subgraph F2["② Projection · mọi thay đổi server"]
+        PJ["TargetProjection<br/>Sync · Delete · Rebuild"]
     end
 
-    subgraph SUP["Thành phần hỗ trợ"]
-        V["validator · CIDR allowlist"]
-        XP["excel.Parser"]
-        XG["excel.Generator"]
-        LC["status.LastCheckReader"]
-        UR["status.UptimeReader"]
-        CA["cache · list version"]
+    subgraph F3["③ Consumer · event từ monitor"]
+        CS["StatusConsumer<br/>read + reclaim loop"]
     end
 
-    subgraph REPO["internal/repository"]
-        R1["ServerRepository<br/>ON CONFLICT resurrect"]
-        R2["IdempotencyRepository"]
-    end
+    R["Repository<br/>ServerRepo · IdempotencyRepo"]
+    PG[("server_db")]
+    RD[("Redis db1")]
 
-    subgraph BG["Goroutine nền"]
-        PJ["projection.TargetProjection<br/>Sync · Delete · Rebuild"]
-        CS["consumer.StatusConsumer<br/>readLoop + reclaimLoop"]
-    end
-
-    subgraph INFRA["Hạ tầng"]
-        PG[("server_db")]
-        RD[("Redis db1")]
-    end
-
-    MW --> H1
-    MW --> H2
-    H1 --> S1
-    H2 --> S2 --> XP
-    H3 --> S3 --> XG
-    H4 --> R1
-
-    S1 --> V
-    S2 --> V
-    S1 --> LC
-    S1 --> UR
-    S3 --> LC
-    S1 --> CA
-
-    S1 --> R1
-    S2 --> R1
-    S3 --> R1
-    MW --> R2
-    R1 --> PG
-    R2 --> PG
-
-    S1 -->|"mọi thay đổi server"| PJ
-    S2 --> PJ
-    PJ -->|"W server:monitor-target:*"| RD
-    LC -->|"R monitor:status:*"| RD
-    UR -->|"R monitor:uptime:index"| RD
-    CA --> RD
-
-    CS -.->|"XREADGROUP<br/>stream:monitor.status"| RD
-    CS -->|"ApplyStatusEvent<br/>version guard"| R1
+    S --> R --> PG
+    S -->|"mọi thay đổi"| PJ
+    PJ -->|"W target projection"| RD
+    S -->|"R status/uptime · cache"| RD
+    CS -. "XREADGROUP stream" .-> RD
+    CS -->|"ApplyStatusEvent · version guard"| R
 ```
 
 **Ba dòng chảy độc lập bên trong service này:**
@@ -133,46 +91,28 @@ Consumer chạy trong chính process này (goroutine khởi động ở `cmd/mai
 
 ## 3. monitor-service — `:8083` (bốn goroutine song song)
 
+Bốn goroutine chạy song song, cùng vòng đời. Tất cả cùng cập nhật `Metrics` (7 chỉ số
+Prometheus tại `/metrics`) — lược khỏi sơ đồ cho gọn:
+
 ```mermaid
-graph TB
-    subgraph LOOPS["4 goroutine chạy song song, cùng vòng đời"]
-        SCH["① Scheduler<br/>1 vòng / 60s<br/>giành round lock"]
-        POOL["② Pool · 200 worker<br/>BRPOP → ping → ApplyStatus"]
-        FB["③ FactBuffer<br/>flush 1000 fact hoặc 5s"]
-        SMP["④ Sampler<br/>lấy mẫu mỗi giây"]
+graph LR
+    subgraph LOOPS["4 goroutine song song"]
+        SCH["① Scheduler · 60s"]
+        POOL["② Pool · 200 worker"]
+        FB["③ FactBuffer"]
+        SMP["④ Sampler · 1s"]
     end
 
-    subgraph HELP["Thành phần hỗ trợ"]
-        OPS["RedisOps<br/>bọc toàn bộ lệnh Redis"]
-        PING["TCPPinger<br/>net.Dialer + phân loại lỗi"]
-        LUA["statusScript (Lua)"]
-        MET["Metrics · 7 chỉ số Prometheus"]
-        FW["FactWriter · ES bulk"]
-    end
+    RD[("Redis db1")]
+    ES[("Elasticsearch")]
+    SIM["tcp-simulator"]
 
-    subgraph INFRA["Hạ tầng"]
-        RD[("Redis db1")]
-        ES[("Elasticsearch")]
-        SIM["tcp-simulator"]
-    end
-
-    HTTP["Gin: /health · /metrics"]
-
-    SCH --> OPS
-    POOL --> OPS
-    SMP --> OPS
-    OPS --> RD
-    OPS -->|"EVALSHA"| LUA --> RD
-
-    POOL --> PING --> SIM
-    POOL -.->|"Add(fact)"| FB
-    FB --> FW --> ES
-
-    SCH --> MET
-    POOL --> MET
-    FB --> MET
-    SMP --> MET
-    MET --> HTTP
+    SCH -->|"nạp queue"| RD
+    SMP -->|"đo queue"| RD
+    POOL -->|"BRPOP + Lua EVALSHA"| RD
+    POOL -->|"TCP ping"| SIM
+    POOL -. "Add(fact)" .-> FB
+    FB -->|"bulk"| ES
 ```
 
 **Vì sao Scheduler chạy trên *mọi* instance nhưng chỉ một instance nạp hàng đợi?**
@@ -194,61 +134,23 @@ graph TB
 
 ## 4. report-service — `:8084`
 
+Hai công việc chính: **snapshot** (cron 00:30) cô đọng dữ liệu, **send** (cron 10:00
+hoặc người dùng) đọc rồi gửi mail.
+
 ```mermaid
-graph TB
-    subgraph HTTP["Gin router"]
-        H1["ReportHandler<br/>GET /summary · POST / · GET /:id"]
-        H2["POST /internal/snapshots/:date<br/>chạy lại snapshot thủ công"]
-    end
+graph LR
+    H["HTTP handlers"] --> RS["ReportService<br/>ParseRange · Summary"]
+    H --> SEND["SendService<br/>FSM gửi mail"]
+    C1["⏰ 00:30"] --> JOB["snapshot.Job<br/>population ⟕ facts"]
+    C2["⏰ 10:00"] --> SEND
 
-    subgraph CRON["⏰ robfig/cron · WithLocation(Asia/Ho_Chi_Minh)"]
-        C1["00:30 → snapshot hôm qua"]
-        C2["10:00 → gửi báo cáo hôm qua"]
-    end
+    JOB -->|"population"| SS["server-service<br/>/internal/servers"]
+    JOB -->|"composite agg"| ES[("Elasticsearch")]
+    JOB -->|"UPSERT"| PG[("report_db")]
 
-    subgraph SVC["internal/service"]
-        S1["ReportService<br/>ParseRange · Summary · ServerUptimeRows"]
-        S2["SendService<br/>FSM: processing → generated<br/>→ sending → sent"]
-    end
-
-    JOBN["snapshot.Job.Run(date)<br/>population LEFT JOIN facts"]
-
-    subgraph OUT["Xuất bản"]
-        RN["email.Renderer<br/>daily_report.html"]
-        XG["excel.Generator<br/>4 cột · chống formula injection"]
-        SN["email.GmailSender<br/>STARTTLS · multipart/mixed"]
-    end
-
-    subgraph REPO["internal/repository + client"]
-        R1["SnapshotRepository<br/>Totals · LowestUptime<br/>AllServerUptime · MissingDates"]
-        R2["JobRepository"]
-        R3["UptimeAggregator (ES)<br/>composite agg + after_key"]
-        CL["ServerClient · HTTP nội bộ"]
-    end
-
-    subgraph INFRA["Hạ tầng"]
-        PG[("report_db")]
-        ES[("Elasticsearch")]
-        SS["server-service<br/>/internal/servers"]
-        SMTP["Gmail SMTP"]
-    end
-
-    H1 --> S1
-    H1 --> S2
-    H2 --> JOBN
-    C1 --> JOBN
-    C2 --> S2
-
-    JOBN --> CL --> SS
-    JOBN --> R3 --> ES
-    JOBN --> R1
-
-    S1 --> R1 --> PG
-    S2 --> S1
-    S2 --> R2 --> PG
-    S2 --> RN
-    S2 --> XG
-    S2 --> SN --> SMTP
+    RS --> PG
+    SEND --> RS
+    SEND --> OUT["Renderer + Excel<br/>→ Gmail SMTP"]
 ```
 
 **Thứ tự hai cron là bắt buộc, không phải ngẫu nhiên:** báo cáo chỉ đọc được thứ mà snapshot đã ghi. 00:30 → 10:00 để lại 9,5 giờ đệm, đủ để chạy lại thủ công nếu job đêm hỏng.
