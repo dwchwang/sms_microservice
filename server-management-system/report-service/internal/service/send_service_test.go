@@ -15,6 +15,7 @@ import (
 	"github.com/vcs-sms/report-service/internal/infrastructure/excel"
 	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/repository"
+	"gorm.io/gorm"
 )
 
 type fakeJobs struct {
@@ -24,12 +25,31 @@ type fakeJobs struct {
 	errMsg  string
 	msgID   string
 	sentID  string
+
+	// byKey stands in for the ux_report_jobs_idem unique index.
+	byKey map[string]*model.ReportJob
+	daily *model.ReportJob
+	// rejectNextCreate simulates another replica winning the key first.
+	rejectNextCreate bool
 }
 
-func (f *fakeJobs) Create(ctx context.Context, job *model.ReportJob) error {
+func idemKey(requesterID, key string) string { return requesterID + "|" + key }
+
+func (f *fakeJobs) Create(ctx context.Context, job *model.ReportJob) (bool, error) {
+	if f.byKey == nil {
+		f.byKey = map[string]*model.ReportJob{}
+	}
+	if job.IdempotencyKey != "" {
+		k := idemKey(job.RequesterID, job.IdempotencyKey)
+		if _, dup := f.byKey[k]; dup || f.rejectNextCreate {
+			f.rejectNextCreate = false
+			return false, nil
+		}
+		f.byKey[k] = job
+	}
 	f.created = job
 	f.states = append(f.states, job.State)
-	return nil
+	return true, nil
 }
 
 func (f *fakeJobs) FindByID(ctx context.Context, id uuid.UUID) (*model.ReportJob, error) {
@@ -37,6 +57,20 @@ func (f *fakeJobs) FindByID(ctx context.Context, id uuid.UUID) (*model.ReportJob
 		return nil, errBoom
 	}
 	return f.created, nil
+}
+
+func (f *fakeJobs) FindByIdempotency(ctx context.Context, requesterID, key string) (*model.ReportJob, error) {
+	if job, ok := f.byKey[idemKey(requesterID, key)]; ok {
+		return job, nil
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+func (f *fakeJobs) FindLatestDaily(ctx context.Context, date string) (*model.ReportJob, error) {
+	if f.daily == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return f.daily, nil
 }
 
 func (f *fakeJobs) SetState(ctx context.Context, id uuid.UUID, state string) error {
@@ -77,7 +111,7 @@ type fakeRenderer struct {
 	err error
 }
 
-func (f *fakeRenderer) Render(s *dto.SummaryResponse) (string, string, error) {
+func (f *fakeRenderer) Render(s *dto.SummaryResponse, reportType string) (string, string, error) {
 	if f.err != nil {
 		return "", "", f.err
 	}
@@ -233,6 +267,96 @@ func TestSend_RecordsRequesterAndKey(t *testing.T) {
 	}
 	if jobs.created.ReportType != model.TypeDaily {
 		t.Errorf("ReportType = %q, want daily", jobs.created.ReportType)
+	}
+}
+
+// The whole point of the key: a retry must not put a second mail on the wire.
+func TestSend_SameKeyReplaysWithoutResending(t *testing.T) {
+	svc, jobs, sender := newTestSendService(nil)
+
+	first, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", "key-1")
+	if err != nil {
+		t.Fatalf("first Send failed: %v", err)
+	}
+	jobs.created.State = model.StateSent
+	sender.sent = nil
+
+	second, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", "key-1")
+	if err != nil {
+		t.Fatalf("second Send failed: %v", err)
+	}
+
+	if second.ID != first.ID {
+		t.Errorf("replayed id = %q, want %q", second.ID, first.ID)
+	}
+	if sender.sent != nil {
+		t.Error("the replay sent a second email")
+	}
+}
+
+func TestSend_SameKeyDifferentContentConflicts(t *testing.T) {
+	svc, _, _ := newTestSendService(nil)
+
+	if _, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", "key-1"); err != nil {
+		t.Fatalf("first Send failed: %v", err)
+	}
+
+	other := req()
+	other.RecipientEmail = "someone-else@vcs.com.vn"
+
+	_, err := svc.Send(context.Background(), other, model.TypeOnDemand, "u1", "key-1")
+
+	if !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("err = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
+// Two replicas racing on the same key: the loser's insert is rejected and it
+// must replay rather than fail, which is why the check is repeated after Create.
+func TestSend_LosingTheInsertRaceReplays(t *testing.T) {
+	svc, jobs, sender := newTestSendService(nil)
+
+	stored := &model.ReportJob{
+		ID:             uuid.New(),
+		ReportType:     model.TypeOnDemand,
+		RequesterID:    "u1",
+		IdempotencyKey: "key-1",
+		StartAt:        time.Date(2026, 7, 16, 0, 0, 0, 0, loc),
+		EndAt:          time.Date(2026, 7, 16, 0, 0, 0, 0, loc),
+		RecipientEmail: "ops@vcs.com.vn",
+		State:          model.StateSent,
+	}
+	jobs.created = stored
+	jobs.rejectNextCreate = true
+	jobs.byKey = map[string]*model.ReportJob{idemKey("u1", "key-1"): stored}
+
+	resp, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", "key-1")
+	if err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+
+	if resp.ID != stored.ID.String() {
+		t.Errorf("id = %q, want the stored job %q", resp.ID, stored.ID)
+	}
+	if sender.sent != nil {
+		t.Error("the losing replica sent an email")
+	}
+}
+
+func TestSend_NoKeyStillCreatesEveryTime(t *testing.T) {
+	svc, jobs, _ := newTestSendService(nil)
+
+	if _, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", ""); err != nil {
+		t.Fatalf("first Send failed: %v", err)
+	}
+	firstID := jobs.created.ID
+
+	if _, err := svc.Send(context.Background(), req(), model.TypeOnDemand, "u1", ""); err != nil {
+		t.Fatalf("second Send failed: %v", err)
+	}
+
+	if jobs.created.ID == firstID {
+		t.Error("a keyless request was deduplicated")
 	}
 }
 

@@ -14,7 +14,11 @@ import (
 	"github.com/vcs-sms/report-service/internal/infrastructure/excel"
 	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/repository"
+	"gorm.io/gorm"
 )
+
+// ErrIdempotencyConflict means the key was already used for different content.
+var ErrIdempotencyConflict = errors.New("idempotency key reused with different content")
 
 // SendService generates a report and mails it, tracking the outcome.
 type SendService interface {
@@ -56,6 +60,13 @@ func (s *sendService) Send(ctx context.Context, req dto.SendReportRequest, repor
 		return nil, err
 	}
 
+	if idempotencyKey != "" {
+		replayed, err := s.replayStored(ctx, requesterID, idempotencyKey, req, start, end)
+		if replayed != nil || err != nil {
+			return replayed, err
+		}
+	}
+
 	job := &model.ReportJob{
 		ID:             uuid.New(),
 		ReportType:     reportType,
@@ -66,8 +77,20 @@ func (s *sendService) Send(ctx context.Context, req dto.SendReportRequest, repor
 		RecipientEmail: req.RecipientEmail,
 		State:          model.StateProcessing,
 	}
-	if err := s.jobs.Create(ctx, job); err != nil {
+	inserted, err := s.jobs.Create(ctx, job)
+	if err != nil {
 		return nil, fmt.Errorf("failed to create report job: %w", err)
+	}
+	// Another replica took the key between the lookup above and this insert.
+	if !inserted {
+		replayed, err := s.replayStored(ctx, requesterID, idempotencyKey, req, start, end)
+		if err != nil {
+			return nil, err
+		}
+		if replayed == nil {
+			return nil, fmt.Errorf("failed to create report job: insert was rejected")
+		}
+		return replayed, nil
 	}
 
 	summary, err := s.reports.Summary(ctx, req.StartDate, req.EndDate)
@@ -81,7 +104,7 @@ func (s *sendService) Send(ctx context.Context, req dto.SendReportRequest, repor
 		s.log.Error().Err(err).Str("job_id", job.ID.String()).Msg("Failed to store the generated report")
 	}
 
-	subject, html, err := s.renderer.Render(summary)
+	subject, html, err := s.renderer.Render(summary, reportType)
 	if err != nil {
 		_ = s.jobs.SetFailed(ctx, job.ID, model.StateFailed, err.Error(), "")
 		return nil, err
@@ -115,6 +138,33 @@ func (s *sendService) Send(ctx context.Context, req dto.SendReportRequest, repor
 		}
 	}
 	return resp, nil
+}
+
+// replayStored returns the job already filed under the key, or nil when the key
+// is free. A key reused for different content is rejected rather than replayed.
+func (s *sendService) replayStored(
+	ctx context.Context,
+	requesterID, key string,
+	req dto.SendReportRequest,
+	start, end time.Time,
+) (*dto.JobResponse, error) {
+	existing, err := s.jobs.FindByIdempotency(ctx, requesterID, key)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to look up idempotency key: %w", err)
+	}
+
+	if existing.StartAt.Format(time.DateOnly) != start.Format(time.DateOnly) ||
+		existing.EndAt.Format(time.DateOnly) != end.Format(time.DateOnly) ||
+		existing.RecipientEmail != req.RecipientEmail {
+		return nil, ErrIdempotencyConflict
+	}
+
+	s.log.Info().Str("job_id", existing.ID.String()).Str("idempotency_key", key).
+		Msg("Replaying stored report job")
+	return s.Get(ctx, existing.ID)
 }
 
 // buildAttachment renders the per-server uptime xlsx for the window.

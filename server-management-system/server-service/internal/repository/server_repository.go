@@ -110,6 +110,9 @@ func (r *serverRepository) FindAll(ctx context.Context, filter *dto.ServerFilter
 		// ipv4 is an inet column; LIKE needs a text form. host() drops any netmask.
 		query = query.Where("host(ipv4) LIKE ?", filter.IPv4+"%")
 	}
+	if filter.TCPPort > 0 {
+		query = query.Where("tcp_port = ?", filter.TCPPort)
+	}
 	if filter.OS != "" {
 		query = query.Where("os ILIKE ?", "%"+filter.OS+"%")
 	}

@@ -88,6 +88,7 @@ function ServersView() {
   const [idSearch, setIdSearch] = useState(sp.get("server_id") ?? "");
   const [nameSearch, setNameSearch] = useState(sp.get("server_name") ?? "");
   const [ipSearch, setIpSearch] = useState(sp.get("ipv4") ?? "");
+  const [portSearch, setPortSearch] = useState(sp.get("tcp_port") ?? "");
   const [importOpen, setImportOpen] = useState(sp.get("import") === "1");
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<ServerResponse | null>(null);
@@ -101,6 +102,9 @@ function ServersView() {
   const serverId = sp.get("server_id") ?? undefined;
   const serverName = sp.get("server_name") ?? undefined;
   const ipv4 = sp.get("ipv4") ?? undefined;
+  const tcpPortParam = sp.get("tcp_port");
+  const tcpPort =
+    tcpPortParam && Number.isFinite(Number(tcpPortParam)) ? Number(tcpPortParam) : undefined;
 
   const params: ServerListParams = useMemo(
     () => ({
@@ -110,10 +114,11 @@ function ServersView() {
       server_id: serverId,
       server_name: serverName,
       ipv4,
+      tcp_port: tcpPort,
       sort_by: sortBy,
       sort_order: sortOrder,
     }),
-    [page, pageSize, status, serverId, serverName, ipv4, sortBy, sortOrder],
+    [page, pageSize, status, serverId, serverName, ipv4, tcpPort, sortBy, sortOrder],
   );
 
   const { data, isLoading, isError, isFetching, refetch } = useServers(params);
@@ -143,6 +148,7 @@ function ServersView() {
       server_id: idSearch.trim() || undefined,
       server_name: nameSearch.trim() || undefined,
       ipv4: ipSearch.trim() || undefined,
+      tcp_port: portSearch.trim() || undefined,
       page: "1",
     });
   }
@@ -152,7 +158,14 @@ function ServersView() {
     setIdSearch("");
     setNameSearch("");
     setIpSearch("");
-    setParam({ server_id: undefined, server_name: undefined, ipv4: undefined, page: "1" });
+    setPortSearch("");
+    setParam({
+      server_id: undefined,
+      server_name: undefined,
+      ipv4: undefined,
+      tcp_port: undefined,
+      page: "1",
+    });
   }
 
   const servers = data?.servers ?? [];
@@ -160,9 +173,11 @@ function ServersView() {
     idSearch.length > 0 ||
     nameSearch.length > 0 ||
     ipSearch.length > 0 ||
+    portSearch.length > 0 ||
     !!serverId ||
     !!serverName ||
-    !!ipv4;
+    !!ipv4 ||
+    tcpPort !== undefined;
 
   return (
     <div>
@@ -193,7 +208,7 @@ function ServersView() {
 
       {/* Toolbar */}
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <form onSubmit={submitSearch} className="grid flex-1 grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_1fr_auto] xl:max-w-4xl">
+        <form onSubmit={submitSearch} className="grid flex-1 grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_1fr_0.7fr_auto] xl:max-w-5xl">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-mute" />
             <Input
@@ -215,6 +230,15 @@ function ServersView() {
               value={ipSearch}
               onChange={(e) => setIpSearch(e.target.value)}
               placeholder="Lọc IPv4..."
+              className="font-mono"
+            />
+          </div>
+          <div className="relative flex-1">
+            <Input
+              value={portSearch}
+              onChange={(e) => setPortSearch(e.target.value.replace(/\D/g, "").slice(0, 5))}
+              inputMode="numeric"
+              placeholder="Lọc port..."
               className={hasSearch ? "pr-9 font-mono" : "font-mono"}
             />
             {hasSearch ? (

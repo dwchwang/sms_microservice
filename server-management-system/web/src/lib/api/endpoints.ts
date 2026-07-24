@@ -58,6 +58,7 @@ export interface ServerListParams {
   server_id?: string;
   server_name?: string;
   ipv4?: string;
+  tcp_port?: number;
   location?: string;
   os?: string;
   sort_by?: string;

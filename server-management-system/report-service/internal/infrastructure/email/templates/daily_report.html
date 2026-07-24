@@ -4,8 +4,11 @@
 <body style="margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2933;">
 <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:8px;">
   <tr>
-    <td style="padding:24px 28px;border-bottom:2px solid #4472c4;">
-      <h1 style="margin:0;font-size:18px;">Báo cáo VCS-SMS</h1>
+    <td style="padding:24px 28px;border-bottom:2px solid {{ if .IsDaily }}#2f855a{{ else }}#4472c4{{ end }};">
+      <span style="display:inline-block;margin:0 0 8px;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;{{ if .IsDaily }}background:#e6f4ea;color:#2f855a;{{ else }}background:#eaf0fb;color:#4472c4;{{ end }}">
+        {{ .Label }}
+      </span>
+      <h1 style="margin:0;font-size:18px;">Báo cáo VCS-SMS{{ if .IsDaily }} — Daily Email{{ end }}</h1>
       <p style="margin:4px 0 0;color:#616e7c;font-size:13px;">
         {{ if eq .StartDate .EndDate }}Ngày {{ date .EndDate }}{{ else }}Từ {{ date .StartDate }} đến {{ date .EndDate }}{{ end }}
       </p>

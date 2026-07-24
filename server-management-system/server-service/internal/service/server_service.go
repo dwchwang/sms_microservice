@@ -548,8 +548,8 @@ func mapServerToResponse(s *model.Server) *dto.ServerResponse {
 
 // buildListCacheKey creates a deterministic cache key from filter parameters and cache version.
 func buildListCacheKey(f *dto.ServerFilter, version string) string {
-	data := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%d|%d",
-		f.Status, f.ServerID, f.ServerName, f.IPv4, f.OS, f.Location,
+	data := fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s|%s|%s|%d|%d",
+		f.Status, f.ServerID, f.ServerName, f.IPv4, f.TCPPort, f.OS, f.Location,
 		f.SortBy, f.SortOrder, f.Page, f.PageSize,
 	)
 	return fmt.Sprintf("server:list:cache:%x:%s", sha256.Sum256([]byte(data)), version)

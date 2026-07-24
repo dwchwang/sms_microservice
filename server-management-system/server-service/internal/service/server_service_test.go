@@ -852,6 +852,14 @@ func TestBuildListCacheKey_DiffersByFilter(t *testing.T) {
 	}
 }
 
+func TestBuildListCacheKey_DiffersByPort(t *testing.T) {
+	a := buildListCacheKey(&dto.ServerFilter{TCPPort: 80, Page: 1, PageSize: 20}, "0")
+	b := buildListCacheKey(&dto.ServerFilter{TCPPort: 8080, Page: 1, PageSize: 20}, "0")
+	if a == b {
+		t.Fatal("expected different cache keys for different ports")
+	}
+}
+
 // ── last_status_check enrichment ──
 
 var testCheckedAt = time.Date(2026, 7, 16, 10, 0, 0, 0, time.UTC)

@@ -24,7 +24,30 @@ import (
 	"github.com/vcs-sms/shared/middleware"
 )
 
+// healthcheck backs the container HEALTHCHECK: the distroless image has no
+// shell, so the binary probes itself.
+func healthcheck() {
+	port := os.Getenv("APP_PORT")
+	if port == "" {
+		port = "8084"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	res, err := client.Get("http://127.0.0.1:" + port + "/health")
+	if err != nil {
+		os.Exit(1)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		healthcheck()
+	}
+
 	cfg := config.LoadConfig()
 
 	log := logger.NewLogger(cfg.App.Name, &logger.LogConfig{
@@ -50,6 +73,7 @@ func main() {
 
 	snapshotRepo := repository.NewSnapshotRepository(db)
 	jobRepo := repository.NewJobRepository(db)
+	cronRepo := repository.NewCronRunRepository(db)
 	aggregator := repository.NewUptimeAggregator(esClient, cfg.ES.IndexPrefix)
 	serverClient := client.NewServerClient(cfg.Server.BaseURL, cfg.Server.Timeout)
 
@@ -69,11 +93,24 @@ func main() {
 	snapshotJob := snapshot.NewJob(serverClient, aggregator, snapshotRepo, loc, log)
 	reportHandler := handler.NewReportHandler(reportSvc, sendSvc)
 
-	cron := scheduler.NewScheduler(snapshotJob, sendSvc, cfg.Report.DailyRecipient, loc, log)
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to resolve hostname for the scheduler owner")
+	}
+
+	cron := scheduler.NewScheduler(
+		cronRepo, jobRepo, snapshotJob, sendSvc,
+		cfg.Report.DailyRecipient, hostname, loc, log)
 	if err := cron.Register(cfg.Report.SnapshotCron, cfg.Report.DailyCron); err != nil {
 		log.Fatal().Err(err).Msg("Failed to register scheduled jobs")
 	}
-	cron.Start()
+
+	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
+	schedulerDone := make(chan struct{})
+	go func() {
+		defer close(schedulerDone)
+		cron.Run(schedulerCtx)
+	}()
 
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -130,7 +167,13 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("Report service forced to shutdown")
 	}
-	cron.Stop()
+
+	stopScheduler()
+	select {
+	case <-schedulerDone:
+	case <-time.After(10 * time.Second):
+		log.Warn().Msg("Scheduler did not stop in time")
+	}
 
 	log.Info().Msg("Report service exited")
 }

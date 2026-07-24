@@ -263,3 +263,23 @@ CREATE TABLE IF NOT EXISTS daily_snapshots (
 
 CREATE INDEX IF NOT EXISTS ix_daily_snapshots_date_uptime
     ON daily_snapshots (date, uptime_pct);
+
+-- Idempotency cho POST /api/v1/reports. Partial index: request không gửi
+-- Idempotency-Key vẫn tạo job bình thường.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_report_jobs_idem
+    ON report_jobs (requester_id, idempotency_key)
+    WHERE idempotency_key <> '';
+
+-- Leader election cho 2 cron job khi report-service chạy nhiều instance.
+-- 1 row = 1 job cho 1 ngày dữ liệu; PK là trọng tài duy nhất.
+CREATE TABLE IF NOT EXISTS cron_runs (
+    job_name      VARCHAR(50)   NOT NULL,
+    run_date      DATE          NOT NULL,
+    state         VARCHAR(20)   NOT NULL CHECK (state IN ('running','done','failed')),
+    owner         VARCHAR(255)  NOT NULL,
+    started_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    heartbeat_at  TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    finished_at   TIMESTAMPTZ,
+    error_message TEXT,
+    PRIMARY KEY (job_name, run_date)
+);

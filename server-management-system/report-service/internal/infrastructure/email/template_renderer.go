@@ -7,6 +7,7 @@ import (
 	"html/template"
 
 	"github.com/vcs-sms/report-service/internal/dto"
+	"github.com/vcs-sms/report-service/internal/model"
 )
 
 //go:embed templates/daily_report.html
@@ -14,7 +15,15 @@ var dailyReportHTML string
 
 // Renderer turns a report summary into an email body.
 type Renderer interface {
-	Render(summary *dto.SummaryResponse) (subject, html string, err error)
+	Render(summary *dto.SummaryResponse, reportType string) (subject, html string, err error)
+}
+
+// reportView carries the report type alongside the summary. The embedded
+// pointer keeps every existing {{ .Field }} in the template working.
+type reportView struct {
+	*dto.SummaryResponse
+	IsDaily bool
+	Label   string
 }
 
 type renderer struct {
@@ -35,16 +44,26 @@ func NewRenderer() (Renderer, error) {
 	return &renderer{tmpl: tmpl}, nil
 }
 
-// Render builds the subject and HTML body.
-func (r *renderer) Render(summary *dto.SummaryResponse) (string, string, error) {
-	subject := fmt.Sprintf("Báo cáo VCS-SMS — ngày %s", formatDate(summary.EndDate))
-	if summary.StartDate != summary.EndDate {
-		subject = fmt.Sprintf("Báo cáo VCS-SMS — %s đến %s",
-			formatDate(summary.StartDate), formatDate(summary.EndDate))
+// Render builds the subject and HTML body, tagged by report type so a daily
+// report is told apart from an on-demand one at a glance.
+func (r *renderer) Render(summary *dto.SummaryResponse, reportType string) (string, string, error) {
+	isDaily := reportType == model.TypeDaily
+	label := "Báo cáo theo yêu cầu (On-demand)"
+	prefix := "[On-demand]"
+	if isDaily {
+		label = "Báo cáo hằng ngày (Daily)"
+		prefix = "[Daily]"
 	}
 
+	period := fmt.Sprintf("ngày %s", formatDate(summary.EndDate))
+	if summary.StartDate != summary.EndDate {
+		period = fmt.Sprintf("%s đến %s", formatDate(summary.StartDate), formatDate(summary.EndDate))
+	}
+	subject := fmt.Sprintf("%s Báo cáo VCS-SMS — %s", prefix, period)
+
 	var buf bytes.Buffer
-	if err := r.tmpl.Execute(&buf, summary); err != nil {
+	view := reportView{SummaryResponse: summary, IsDaily: isDaily, Label: label}
+	if err := r.tmpl.Execute(&buf, view); err != nil {
 		return "", "", fmt.Errorf("failed to render report template: %w", err)
 	}
 	return subject, buf.String(), nil

@@ -278,21 +278,6 @@ func TestRun_UsesReportTimezoneDayBoundaries(t *testing.T) {
 	}
 }
 
-func TestRunYesterday_PicksTheDayBefore(t *testing.T) {
-	pop := &fakePopulation{}
-	job := NewJob(pop, &fakeAggregator{}, &fakeSnapshots{}, loc, zerolog.New(io.Discard))
-	now := time.Date(2026, 7, 16, 0, 30, 0, 0, loc)
-
-	result, err := job.RunYesterday(context.Background(), now)
-	if err != nil {
-		t.Fatalf("RunYesterday failed: %v", err)
-	}
-
-	if got := result.Date.Format(time.DateOnly); got != "2026-07-15" {
-		t.Errorf("snapshotted %s, want 2026-07-15", got)
-	}
-}
-
 func TestRun_PropagatesFailures(t *testing.T) {
 	cases := map[string]func(*Job){
 		"population": func(j *Job) { j.population = &fakePopulation{err: errBoom} },

@@ -139,10 +139,10 @@ services:
     networks:
       - vcs-network
     deploy:
-      replicas: 1
+      replicas: 2
 
   server-service:
-    image: baohoang2411/vcs-sms-server:1.0.0
+    image: baohoang2411/vcs-sms-server:1.1.0
     environment:
       SERVER_DB_HOST: postgres
       SERVER_DB_PORT: 5432
@@ -160,7 +160,7 @@ services:
     networks:
       - vcs-network
     deploy:
-      replicas: 1
+      replicas: 2
 
   monitor-service:
     image: baohoang2411/vcs-sms-monitor:1.0.0
@@ -177,10 +177,10 @@ services:
     networks:
       - vcs-network
     deploy:
-      replicas: 1
+      replicas: 3
 
   report-service:
-    image: baohoang2411/vcs-sms-report:1.0.0
+    image: baohoang2411/vcs-sms-report:1.1.0
     environment:
       REPORT_DB_HOST: postgres
       REPORT_DB_PORT: 5432
@@ -202,15 +202,31 @@ services:
     secrets:
       - smtp_password
     # Logs go to stdout only (docker service logs).
+    healthcheck:
+      test: ["CMD", "/app/bin/report-service", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     networks:
       - vcs-network
     deploy:
-      replicas: 1
+      # Every replica runs the scheduler; the cron_runs claim picks the one that
+      # does the work, so this number is free to change.
+      replicas: 3
+      update_config:
+        order: start-first
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: any
 
   web:
-    image: baohoang2411/vcs-sms-web:1.0.3
+    image: baohoang2411/vcs-sms-web:1.1.0
+    # NEXT_PUBLIC_* is baked at build time, so this runtime env is informational
+    # only; the browser bundle already carries the URL passed at docker build.
     environment:
-      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8080/api/v1"
+      NEXT_PUBLIC_API_BASE_URL: "http://192.168.8.131:8080/api/v1"
     ports:
       - "3000:3000"
     networks:

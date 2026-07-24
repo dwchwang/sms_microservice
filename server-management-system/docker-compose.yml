@@ -189,7 +189,8 @@ services:
     build:
       context: .
       dockerfile: report-service/Dockerfile
-    container_name: vcs-sms-report
+    # No container_name and no log bind mount: both prevent
+    # `docker compose up --scale report-service=3`. Logs go to stdout.
     expose:
       - "8084"
     env_file:
@@ -202,8 +203,12 @@ services:
         condition: service_healthy
       server-service:
         condition: service_started
-    volumes:
-      - ./logs/report:/var/log/vcs-sms
+    healthcheck:
+      test: ["CMD", "/app/bin/report-service", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     networks:
       - vcs-network
 

@@ -35,6 +35,7 @@ type ServerFilter struct {
 	ServerID   string `form:"server_id" json:"server_id"`
 	ServerName string `form:"server_name" json:"server_name"`
 	IPv4       string `form:"ipv4" json:"ipv4"`
+	TCPPort    int    `form:"tcp_port" json:"tcp_port" binding:"omitempty,min=1,max=65535"`
 	OS         string `form:"os" json:"os"`
 	Location   string `form:"location" json:"location"`
 	SortBy     string `form:"sort_by" json:"sort_by"`

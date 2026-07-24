@@ -43,12 +43,6 @@ type Result struct {
 	CoveragePct   float64
 }
 
-// RunYesterday snapshots the day before now, in the report timezone.
-func (j *Job) RunYesterday(ctx context.Context, now time.Time) (*Result, error) {
-	today := startOfDay(now.In(j.loc))
-	return j.Run(ctx, today.AddDate(0, 0, -1))
-}
-
 // Run snapshots one whole day. The window is half-open: [00:00, next 00:00).
 func (j *Job) Run(ctx context.Context, date time.Time) (*Result, error) {
 	start := startOfDay(date.In(j.loc))

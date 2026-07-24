@@ -109,6 +109,9 @@ func handleReportError(c *gin.Context, err error) {
 		// wrong rather than merely unavailable.
 		response.ErrorWithCode(c, http.StatusUnprocessableEntity,
 			apperrors.CodeReportDataUnavailable, err.Error())
+	case errors.Is(err, service.ErrIdempotencyConflict):
+		response.ErrorWithCode(c, http.StatusConflict,
+			apperrors.CodeReportIdempotency, err.Error())
 	case errors.Is(err, email.ErrRecipientNotAllowed):
 		response.ErrorWithCode(c, http.StatusUnprocessableEntity,
 			apperrors.CodeReportRecipientBlocked, err.Error())

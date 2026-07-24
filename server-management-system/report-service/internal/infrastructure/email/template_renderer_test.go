@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/vcs-sms/report-service/internal/dto"
+	"github.com/vcs-sms/report-service/internal/model"
 	"github.com/vcs-sms/report-service/internal/repository"
 )
 
@@ -25,12 +26,16 @@ func summary() *dto.SummaryResponse {
 }
 
 func render(t *testing.T, s *dto.SummaryResponse) (string, string) {
+	return renderAs(t, s, model.TypeOnDemand)
+}
+
+func renderAs(t *testing.T, s *dto.SummaryResponse, reportType string) (string, string) {
 	t.Helper()
 	r, err := NewRenderer()
 	if err != nil {
 		t.Fatalf("NewRenderer failed: %v", err)
 	}
-	subject, html, err := r.Render(s)
+	subject, html, err := r.Render(s, reportType)
 	if err != nil {
 		t.Fatalf("Render failed: %v", err)
 	}
@@ -154,6 +159,31 @@ func TestRender_EmptyTopOmitsTheSection(t *testing.T) {
 
 	if strings.Contains(html, "uptime thấp nhất") {
 		t.Error("the ranking section should be omitted when there is nothing to rank")
+	}
+}
+
+func TestRender_DailyIsLabelledDistinctly(t *testing.T) {
+	subject, html := renderAs(t, summary(), model.TypeDaily)
+
+	if !strings.Contains(subject, "[Daily]") {
+		t.Errorf("daily subject = %q, want a [Daily] tag", subject)
+	}
+	if !strings.Contains(html, "Daily Email") || !strings.Contains(html, "Báo cáo hằng ngày") {
+		t.Error("daily body is missing its distinguishing title")
+	}
+}
+
+func TestRender_OnDemandIsLabelledDistinctly(t *testing.T) {
+	subject, html := renderAs(t, summary(), model.TypeOnDemand)
+
+	if !strings.Contains(subject, "[On-demand]") {
+		t.Errorf("on-demand subject = %q, want an [On-demand] tag", subject)
+	}
+	if strings.Contains(html, "Daily Email") {
+		t.Error("an on-demand report must not carry the daily title")
+	}
+	if !strings.Contains(html, "On-demand") {
+		t.Error("on-demand body is missing its label")
 	}
 }
 
