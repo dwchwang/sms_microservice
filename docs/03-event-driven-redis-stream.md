@@ -118,9 +118,10 @@ cache version.
 
 ### Phục hồi khi mất consumer group
 
-Redis restart không persistence, `FLUSHDB`, hoặc `allkeys-lru` evict key stream →
-`XREADGROUP` trả `NOGROUP` mãi mãi trong khi monitor vẫn ghi. Nếu chỉ tạo group một
-lần lúc boot thì **status trong PostgreSQL đứng im vĩnh viễn**, và chỉ có log báo.
+Redis restart mất persistence hoặc `FLUSHDB` → group biến mất, `XREADGROUP` trả
+`NOGROUP` mãi mãi trong khi monitor vẫn ghi. (Chính sách `volatile-lru` **không** evict
+được stream vì stream không có TTL — xem [02](./02-database-strategy.md) §4.) Nếu chỉ tạo
+group một lần lúc boot thì **status trong PostgreSQL đứng im vĩnh viễn**, và chỉ có log báo.
 
 Consumer tự phát hiện `NOGROUP` và tạo lại group (~4s):
 

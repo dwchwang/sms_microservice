@@ -31,52 +31,36 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph CLIENT["Trình duyệt"]
-        WEB["🌐 Web UI · Next.js :3000"]
-    end
+    WEB["🌐 Web · Next.js :3000"] --> TRAEFIK["🚪 Traefik :8080<br/>CORS → ForwardAuth → RateLimit"]
 
-    subgraph GATEWAY["Gateway"]
-        TRAEFIK["🚪 Traefik v3 :8080<br/>CORS → ForwardAuth → RateLimit"]
-    end
+    TRAEFIK --> AUTH["🔐 auth-service :8081"]
+    TRAEFIK --> SRV["🖥️ server-service :8082"]
+    TRAEFIK --> REP["📊 report-service :8084"]
+    MON["📡 monitor-service :8083"]
 
-    subgraph APP["Application Services"]
-        AUTH["🔐 auth-service :8081<br/>JWT · RBAC · ForwardAuth"]
-        SRV["🖥️ server-service :8082<br/>CRUD · Import/Export · Consumer"]
-        MON["📡 monitor-service :8083<br/>Scheduler · 200 worker · Facts"]
-        REP["📊 report-service :8084<br/>Snapshot ⏰ · Email + Excel"]
-    end
-
-    subgraph DATA["Hạ tầng dữ liệu"]
-        PG[("🐘 PostgreSQL 17<br/>identity_db · server_db · report_db")]
-        REDIS[("⚡ Redis 8<br/>db0 = auth · db1 = monitor/cache")]
-        ES[("🔍 Elasticsearch 8.12<br/>server-status-logs-*")]
-    end
-
-    SIM["🎭 tcp-simulator<br/>10.000 port 9001-19000"]
-
-    WEB -->|"/api/v1/*"| TRAEFIK
-    TRAEFIK -.->|"ForwardAuth<br/>GET /internal/verify"| AUTH
-    TRAEFIK -->|"/api/v1/auth"| AUTH
-    TRAEFIK -->|"🔒 /api/v1/servers"| SRV
-    TRAEFIK -->|"🔒 /api/v1/reports"| REP
-
-    AUTH --> PG
-    AUTH -->|"blacklist · brute-force"| REDIS
-
+    AUTH --> PG[("🐘 PostgreSQL 17")]
     SRV --> PG
-    SRV -->|"W target projection<br/>R status · uptime index"| REDIS
-    SRV -.->|"R stream:monitor.status"| REDIS
-
-    MON -->|"R target · W status<br/>W stream"| REDIS
-    MON -.->|"bulk facts"| ES
-    MON -->|"TCP ping"| SIM
-
     REP --> PG
-    REP -->|"R aggregation 1 lần/ngày"| ES
-    REP -->|"GET /internal/servers"| SRV
+
+    AUTH --> REDIS[("⚡ Redis 8")]
+    SRV --> REDIS
+    MON --> REDIS
+
+    MON --> ES[("🔍 Elasticsearch")]
+    REP --> ES
+    MON --> SIM["🎭 tcp-simulator"]
+
+    REP -. "GET /internal/servers" .-> SRV
 ```
 
-> **Điểm mấu chốt:** monitor-service **không** có PostgreSQL và **không** gọi HTTP tới server-service. Toàn bộ trao đổi giữa hai bên đi qua Redis.
+Traefik xác thực mọi request bằng ForwardAuth (`GET /internal/verify` của auth-service)
+rồi mới định tuyến `/auth`, `/servers`, `/reports`. Redis chia hai không gian khoá:
+`db0` cho auth (blacklist, brute-force), `db1` cho monitor + cache + projection.
+
+> **Điểm mấu chốt:** monitor-service **không** có PostgreSQL và **không** có endpoint
+> public. Nó không gọi HTTP tới server-service — toàn bộ trao đổi giữa hai bên đi qua
+> Redis (server-service ghi target, monitor ghi status + stream, server-service consume
+> stream). Xem §3.
 
 ---
 
@@ -84,53 +68,20 @@ graph TB
 
 ```mermaid
 graph LR
-    subgraph R1["① Mỗi 60 giây"]
-        SCH["Scheduler<br/>giành round lock"]
-        Q(["monitor:ping:queue:{round}"])
-        W["200 worker<br/>BRPOP → TCP dial"]
-        SCH -->|"SSCAN 10.000 id"| Q
-        Q --> W
-    end
+    SCH["① Scheduler<br/>nạp queue mỗi 60s"] --> W["② 200 worker<br/>BRPOP → TCP ping"]
+    W --> LUA["③ Lua atomic<br/>status + counter + stream"]
 
-    subgraph R2["② Ghi kết quả nguyên tử"]
-        LUA["Lua script<br/>1 lệnh · 3 key"]
-        ST[("monitor:status:{id}<br/>total_checks · on_checks")]
-        UX[("monitor:uptime:index<br/>ZSET % uptime")]
-        STREAM[("stream:monitor.status<br/>CHỈ khi đổi trạng thái")]
-        LUA --> ST
-        LUA --> UX
-        LUA --> STREAM
-    end
+    LUA --> ST[("monitor:status<br/>+ uptime index")]
+    LUA -->|"CHỈ khi status đổi"| STREAM[("stream:monitor.status")]
+    W -. "fact buffer" .-> ES[("Elasticsearch<br/>server-status-logs-*")]
 
-    subgraph R3["③ Hai đường tách biệt"]
-        CONS["Consumer<br/>server-service"]
-        PGS[("servers.status<br/>PostgreSQL")]
-        BUF["FactBuffer<br/>1000 fact / 5 giây"]
-        ESI[("server-status-logs-<br/>YYYY.MM.DD")]
-    end
-
-    subgraph R4["④ 00:30 giờ VN ⏰"]
-        JOB["Snapshot Job<br/>population LEFT JOIN facts"]
-        SNAP[("daily_snapshots<br/>1 dòng / server / ngày")]
-    end
-
-    subgraph R5["⑤ 10:00 VN ⏰ hoặc theo yêu cầu"]
-        MAIL["Email HTML<br/>+ uptime_*.xlsx"]
-    end
-
-    DASH["Dashboard<br/>/servers · /reports"]
-
-    W --> LUA
-    STREAM -.-> CONS --> PGS
-    W -.-> BUF -.-> ESI
-    ESI --> JOB
-    JOB --> SNAP --> MAIL
-
-    ST -->|"realtime"| DASH
-    UX --> DASH
+    STREAM --> CONS["④ Consumer<br/>server-service"] --> PGS[("servers.status")]
+    ES -->|"⑤ agg 00:30 VN ⏰"| SNAP[("daily_snapshots")]
+    SNAP -->|"⑥ 10:00 VN ⏰"| MAIL["Email HTML + Excel"]
+    ST -->|"realtime"| DASH["Dashboard"]
 ```
 
-**Vì sao tách bước ② thành hai đường ở bước ③?**
+**Vì sao tách kết quả thành hai đường (stream ↔ fact)?**
 
 Đường **stream** phải *chính xác* (trạng thái hiện tại của server), nên dùng Redis Stream có consumer group, ACK và version guard. Đường **fact** chỉ cần *đủ tốt* (số liệu thống kê); mất vài fact chỉ làm coverage giảm — vì thế `FactBuffer` được phép **drop** khi ES sập, thay vì phình bộ nhớ đến chết.
 
