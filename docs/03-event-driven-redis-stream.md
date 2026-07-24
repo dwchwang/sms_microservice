@@ -53,6 +53,10 @@ Nếu tách HSET và XADD thành hai lệnh, sẽ có một khoảnh khắc Redi
 đằng còn stream nói một nẻo. Process chết đúng lúc đó → hai nguồn lệch nhau vĩnh viễn.
 
 ```lua
+-- KEYS[1] monitor:status:{id}   KEYS[2] stream:monitor.status
+-- KEYS[3] monitor:uptime:index
+-- ARGV    server_id, status, checked_at(RFC3339), latency_ms, round_id, day(VN)
+
 local old_status = redis.call('HGET', status_key, 'status')
 local old_round  = tonumber(redis.call('HGET', status_key, 'round_id') or '-1')
 
@@ -64,6 +68,18 @@ redis.call('HSET', status_key,
   'status', new_status, 'last_checked_at', checked_at,
   'latency_ms', latency, 'round_id', round_id)
 
+-- Bộ đếm theo NGÀY VN. Reset ở lần check đầu tiên của ngày mới, nên dashboard
+-- đọc "hôm nay" chứ không phải một tổng luỹ kế mà AOF mang qua mọi lần restart.
+if redis.call('HGET', status_key, 'day') ~= day then
+  redis.call('HSET', status_key, 'day', day, 'day_total', 0, 'day_on', 0)
+end
+local total = redis.call('HINCRBY', status_key, 'day_total', 1)
+local ons = tonumber(redis.call('HGET', status_key, 'day_on') or '0')
+if new_status == 'ON' then
+  ons = redis.call('HINCRBY', status_key, 'day_on', 1)
+end
+redis.call('ZADD', uptime_key, (ons / total) * 100, server_id)
+
 if old_status == false or old_status ~= new_status then
   redis.call('XADD', stream_key, 'MAXLEN', '~', '100000', '*', ...)
   return 1                          -- có transition
@@ -71,6 +87,18 @@ end
 
 return 2                            -- status không đổi: KHÔNG phát event
 ```
+
+### Bộ đếm nằm sau chốt chặn round, và đó là điều bắt buộc
+
+Nếu đếm **trước** `round_id <= old_round`, một round phát lại (worker chậm ghi muộn, hoặc
+`SSCAN` trả trùng phần tử) sẽ cộng thêm vào `day_total` mà không có lượt ping thật nào
+tương ứng — uptime % bị bóp méo mà không ai thấy vì không có lỗi nào được ném ra.
+
+### `day` do Go truyền vào, không do Lua tự lấy
+
+`redis.call('TIME')` trả UTC. Dùng nó sẽ làm bộ đếm reset lúc **7 giờ sáng** giờ Việt Nam,
+tức là dashboard buổi sáng hiển thị số của hai ngày trộn lẫn. Vì vậy `ARGV[6]` là ngày
+`YYYY-MM-DD` đã quy đổi sang `Asia/Ho_Chi_Minh` bằng `shared/timezone` ở phía Go.
 
 ### `old_status == false`, không phải `== nil`
 

@@ -1,6 +1,16 @@
 # 🔀 Sơ đồ trạng thái — các máy trạng thái trong hệ thống
 
-> Cập nhật: 21/07/2026
+> Cập nhật: 24/07/2026
+
+| # | Máy trạng thái | Nơi lưu |
+|---|---|---|
+| [1](#1-trạng-thái-server) | Trạng thái server | `servers.status` + `monitor:status:{id}` |
+| [2](#2-trạng-thái-report-job) | Report job | `report_jobs.state` |
+| [3](#3-kết-cục-của-một-dòng-trong-file-import) | Một dòng file import | chỉ trong response |
+| [4](#4-vòng-đời-một-round-giám-sát) | Round giám sát | Redis (lock · queue · current) |
+| [5](#5-factbuffer--dưới-áp-lực) | FactBuffer | bộ nhớ process |
+| [6](#6-sức-khoẻ-dữ-liệu-báo-cáo) | Sức khoẻ dữ liệu báo cáo | `daily_snapshots` |
+| [7](#7-cron-run--ai-được-chạy-job-hôm-nay) | Cron run (leader election) | `cron_runs.state` |
 
 ---
 
@@ -45,10 +55,20 @@ graph LR
     B -->|"consumer, độ trễ dưới giây"| C["servers.status<br/>trong PostgreSQL"]
 
     A -.->|"nguồn NHANH<br/>dùng cho dashboard"| D["/servers/uptime"]
+    A -.->|"last_checked_at, đọc tươi"| E
     C -.->|"nguồn BỀN<br/>dùng cho danh sách + export"| E["/servers"]
 ```
 
 Redis luôn đi trước một chút. Đó là chủ đích: dashboard cần nhanh, danh sách cần bền và query được bằng SQL.
+
+`GET /servers` lấy **cả hai**: `status` từ PostgreSQL (qua cache), còn
+`last_status_check` đọc tươi từ Redis lúc serialize. Field thứ hai đổi mỗi phút, nên nhét
+nó vào cache entry sẽ buộc bump version mỗi 60 giây và cache thành vô dụng.
+
+**Xoá server phải dọn cả hai nơi.** `servers.deleted_at = NOW()` là chưa đủ:
+`TargetProjection.Delete` còn phải `ZREM monitor:uptime:index` và
+`DEL monitor:status:{id}`. Thiếu bước đó, một server đã xoá vẫn tiếp tục chấm điểm trong
+bảng "10 server tệ nhất" của dashboard mãi mãi — vì cả hai key ấy **không có TTL**.
 
 ---
 
@@ -216,5 +236,76 @@ Ba mức phản ứng, tương ứng ba mức độ nghiêm trọng:
 | Tình trạng | Phản ứng |
 |-----------|----------|
 | Mất vài fact | im lặng, coverage nhích xuống |
-| Coverage < 95% | vẫn gửi, **có cảnh báo** trong email |
+| Coverage < `REPORT_COVERAGE_THRESHOLD` (95%) | vẫn gửi, **có cảnh báo** trong email (`degraded = true`) |
 | Thiếu hẳn snapshot một ngày | **từ chối gửi**, nêu rõ ngày nào thiếu |
+
+---
+
+## 7. Cron run — ai được chạy job hôm nay
+
+Một dòng `cron_runs` cho mỗi cặp `(job_name, run_date)`. Đây là toàn bộ cơ chế
+leader election của `report-service`, và nó không dùng thành phần ngoài nào —
+chỉ ràng buộc PRIMARY KEY của PostgreSQL.
+
+```mermaid
+stateDiagram-v2
+    [*] --> running: TryClaim thắng<br/>INSERT ... 'running', owner = tôi
+
+    running --> running: Heartbeat mỗi 30s<br/>UPDATE heartbeat_at WHERE owner = tôi
+    running --> done: MarkDone WHERE owner = tôi
+    running --> failed: MarkFailed WHERE owner = tôi
+
+    failed --> running: TryClaim của tick sau<br/>ON CONFLICT ... WHERE state = 'failed'
+    running --> running: bị CƯỚP — heartbeat_at cũ hơn 3 phút<br/>owner đổi sang replica khác
+
+    done --> [*]: điểm dừng duy nhất
+
+    note right of done
+        'done' KHÔNG bao giờ được claim lại.
+        Đây là thứ bảo đảm một job chỉ
+        chạy đúng một lần cho mỗi ngày dữ liệu.
+    end note
+
+    note left of failed
+        'failed' KHÔNG khoá vĩnh viễn:
+        tick kế tiếp thử lại được.
+        Lỗi tạm thời (ES nghẹt, DB timeout)
+        tự khỏi mà không cần ai can thiệp.
+    end note
+```
+
+**Ba trạng thái, và điều gì làm mỗi trạng thái khác nhau:**
+
+| State | Claim lại được? | Ý nghĩa |
+|---|:---:|---|
+| `running` | chỉ khi `heartbeat_at` cũ hơn `staleAfter` = 3 phút | có replica đang làm, **hoặc** replica đó đã chết |
+| `failed` | ✅ ngay tick sau | đã thử và lỗi; thử lại là đúng |
+| `done` | ❌ không bao giờ | xong rồi |
+
+### Vì sao cần cả heartbeat, không chỉ TTL
+
+`running` một mình là mơ hồ: không phân biệt được **job chạy chậm** (snapshot 14,4 triệu
+document có thể mất vài phút) với **replica đã chết**. `heartbeat_at` biến sự khác biệt đó
+thành một phép so sánh: quá 6 nhịp (3 phút) không cập nhật thì coi là mồ côi.
+
+Chiều còn lại cũng quan trọng: khi `Heartbeat` trả về `RowsAffected = 0` — nghĩa là claim
+đã bị cướp — `beat()` **cancel context của job đang chạy**. Không có bước này, một replica
+bị treo mạng 4 phút rồi hồi phục sẽ tiếp tục ghi vào cùng `run_date` mà replica mới đang xử lý.
+
+### Vì sao mọi lệnh ghi đều có `WHERE owner = ?`
+
+```mermaid
+graph LR
+    A["replica A: claim, chạy chậm"] --> B["mạng đứt 4 phút"]
+    B --> C["replica B cướp claim<br/>owner = B"]
+    C --> D["B chạy xong → MarkDone(owner=B) ✅"]
+    A --> E["A hồi phục, job xong,<br/>gọi MarkDone(owner=A)"]
+    E --> F["0 row — KHÔNG ghi đè<br/>vì owner hiện tại là B"]
+```
+
+Không có guard này, A sẽ ghi `done` lên một dòng mà thực ra B đang giữ, và nếu B lỗi thì
+kết quả là một job `done` giả.
+
+Một trường hợp nữa được xử lý riêng: khi service **shutdown giữa job**,
+`runClaimed` cố ý **không** ghi gì cả và để claim tự hết hiệu lực sau 3 phút. Ghi `failed`
+lúc đó sẽ đúng về hình thức nhưng nói sai sự thật — job không thất bại, nó chỉ bị dừng.

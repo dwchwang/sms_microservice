@@ -1,7 +1,32 @@
+> # 📜 GHI CHÉP THIẾT KẾ BAN ĐẦU — KHÔNG PHẢI TÀI LIỆU THAM CHIẾU
+>
+> Đây là ghi chép brainstorm **trước khi triển khai**, và một số quyết định trong này đã bị
+> đảo ngược sau khi code chạy thật. Giữ lại vì phần *lý do* vẫn hữu ích, nhưng **đừng dùng
+> nó để tra cứu hệ thống hiện tại**.
+>
+> **Những quyết định đã bị đảo ngược:**
+>
+> | Ghi chép này chốt | Thực tế đã làm |
+> |---|---|
+> | Kafka cho event-driven | **Redis Stream** — bài toán chỉ có 1 event, 1 producer, 1 consumer group |
+> | API Gateway tự viết | **Traefik** + ForwardAuth |
+> | 5 service (FileIO Service riêng) | **4 service** — import/export là adapter của server-service |
+> | Separate schemas trong một database | **Database-per-service** — 3 database, 3 DB user |
+>
+> **Nguồn tham chiếu hiện hành:** [BaoCao-MoTa-ThietKe-HeThong.md](./BaoCao-MoTa-ThietKe-HeThong.md)
+> · [01-architecture-overview.md](./01-architecture-overview.md)
+> · [`.claude/diagrams/`](../.claude/diagrams/README.md)
+> · `refactor.md` (đối chiếu chi tiết cũ ↔ mới)
+>
+> *(Ghi chú thêm ngày 24/07/2026.)*
+
+---
+
 # 🧠 Brainstorm: VCS Server Management System (VCS-SMS) — Bản hoàn chỉnh
 
 > [!IMPORTANT]
 > **Tài liệu này đã được hoàn thiện** với 6 quyết định thiết kế đã chốt. Sẵn sàng chuyển sang phase triển khai.
+> *(📜 Bối cảnh lịch sử — xem banner ở đầu file. Bốn trong sáu quyết định dưới đây đã bị đảo ngược.)*
 
 ---
 

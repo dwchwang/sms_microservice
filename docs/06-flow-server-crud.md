@@ -80,14 +80,22 @@ PUT /api/v1/servers/{server_id}
 DELETE /api/v1/servers/{server_id}
   ├─ RequireScope("server:delete")
   ├─ UPDATE servers SET deleted_at = NOW()      ← soft delete
-  ├─ Gỡ target projection:
+  ├─ Gỡ target projection VÀ dọn dấu vết monitoring:
   │     SREM server:monitor-target:ids  {id}    ← id TRƯỚC
   │     DEL  server:monitor-target:{id}         ← hash SAU
+  │     ZREM monitor:uptime:index       {id}    ← nếu không: vẫn chấm điểm mãi mãi
+  │     DEL  monitor:status:{id}                ← nếu không: last_checked_at đứng im
   └─ INCR server:list:version
 ```
 
 **Gỡ ID trước, xóa hash sau** — ngược với lúc tạo. Cả hai thứ tự đều nhằm để Monitor
 không bao giờ thấy ID mà thiếu metadata.
+
+**Server Service dọn hai key mà Monitoring sở hữu.** Đây là ngoại lệ duy nhất của quy tắc
+"mỗi namespace một owner", và nó cần thiết: `monitor:uptime:index` và `monitor:status:*`
+**không có TTL**, nên một server đã xoá sẽ tiếp tục xuất hiện trong bảng "10 server tệ
+nhất" của dashboard cho tới khi có người xoá tay. Monitoring không thể tự dọn vì nó không
+biết server nào đã bị xoá — nó chỉ đọc projection, và server đó đã rời projection rồi.
 
 `server_id` unique **toàn cục kể cả row đã xóa**, nên một ID đã dùng thì không tái sử
 dụng được. Đây là chủ ý: nó bảo vệ lịch sử trong `daily_snapshots` và ES khỏi bị
@@ -116,10 +124,38 @@ Sửa được 3 loại lệch: thiếu hash, thiếu ID, hash mồ côi.
 
 ---
 
-## 6. `GET /servers/stats`
+## 6. `GET /servers/stats` và `GET /servers/uptime`
 
-Trả số ON/OFF/UNKNOWN **hiện tại**, cache TTL 10s (`server:stats:cache`), phục vụ
-dashboard realtime.
+Hai endpoint, cùng scope `server:stats`, hai câu hỏi khác nhau:
+
+| | `/servers/stats` | `/servers/uptime` |
+|---|---|---|
+| Trả gì | `total`, `on`, `off`, `unknown` | phân bố uptime + top 10 tệ nhất |
+| Nguồn | PostgreSQL `COUNT(*)` theo `status` | Redis ZSET `monitor:uptime:index` |
+| Kỳ | **hiện tại** | **ngày hôm nay** (giờ VN) |
+| Cache | `server:stats:cache` TTL 10s | `server:uptime:cache` TTL 10s |
+
+`/servers/uptime` gọi `/servers/stats` bên trong (nên bao gồm luôn `total_servers`,
+`servers_on/off/unknown`), rồi bổ sung phần uptime bằng **một** pipeline Redis:
+
+```text
+ZCARD  monitor:uptime:index                → số server đã được chấm điểm
+ZCOUNT monitor:uptime:index 100 100        → servers_uptime_100
+ZCOUNT monitor:uptime:index 0 0            → servers_uptime_0
+ZCOUNT monitor:uptime:index (0 (100        → servers_uptime_partial
+ZRANGE monitor:uptime:index 0 9 WITHSCORES → top_10_lowest_uptime
+HMGET  monitor:status:{id} day_total day_on → số đếm thô cho 10 server đó
+```
+
+Không lệnh nào scale theo số server, nên endpoint này trả lời trong khoảng 0,1s với 10.000
+server.
+
+`servers_no_data = total_servers − ZCARD`: server vừa tạo chưa qua round nào thì không có
+mặt trong ZSET, và nó phải được **đếm riêng** chứ không bị coi là uptime 0%.
+
+`avg_uptime_pct` là trung bình các **phần trăm từng server**, không phải tỉ lệ
+`Σon / Σtotal` toàn hệ thống — cùng định nghĩa với `avg_uptime_pct` của report, để hai con
+số so sánh được với nhau.
 
 Đừng nhầm với `servers_on_at_end_at` trong report: cái đó là ON/OFF **tại cuối kỳ
 report**. Hai câu hỏi khác nhau, hai nguồn khác nhau.

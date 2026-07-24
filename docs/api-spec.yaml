@@ -13,12 +13,23 @@ info:
 
     ## Monitoring không có public endpoint
     Người dùng xem trạng thái mới nhất qua `GET /servers` (status đọc từ
-    PostgreSQL, cập nhật qua Redis Stream) và `GET /servers/stats`. Với chu kỳ
-    ping 60 giây, độ mới của dữ liệu luôn nằm trong một phút.
+    PostgreSQL, cập nhật qua Redis Stream), `GET /servers/stats` và
+    `GET /servers/uptime`. Với chu kỳ ping 60 giây, độ mới của dữ liệu luôn nằm
+    trong một phút.
+
+    ## Ba nguồn số liệu uptime — đừng nhầm lẫn
+    - `GET /servers/stats` — số ON/OFF/UNKNOWN **hiện tại** (PostgreSQL, cache 10s).
+    - `GET /servers/uptime` — uptime của **ngày hôm nay** giờ VN (bộ đếm Redis, tự
+      reset lúc nửa đêm). Trả lời được mọi lúc, không cần snapshot.
+    - `GET /reports/summary` — uptime của một **khoảng ngày đã kết thúc**
+      (`daily_snapshots`). Từ chối nếu có ngày chưa snapshot.
 
     ## Idempotency
-    `POST /servers` và `POST /servers/import` yêu cầu header `Idempotency-Key`.
-    Cùng key + cùng body trả lại response cũ; cùng key + body khác trả 409.
+    `POST /servers` và `POST /servers/import` **yêu cầu** header `Idempotency-Key`;
+    thiếu là 400. Cùng key + cùng body trả lại response cũ; cùng key + body khác trả 409.
+
+    `POST /reports` thì **không bắt buộc**: có header thì dùng để replay job cũ,
+    không có thì tạo job mới bình thường.
     
     ## Authentication
     Tất cả API (trừ register, login, refresh) yêu cầu JWT Bearer token.
@@ -34,7 +45,7 @@ info:
       "meta": { "request_id": "req-uuid", "timestamp": "2026-06-10T10:00:00Z" }
     }
     ```
-  version: 1.0.0
+  version: 2.1.0
   contact:
     name: SMS Team
   license:
@@ -51,8 +62,6 @@ tags:
     description: CRUD server
   - name: Import/Export
     description: Import/Export Excel
-  - name: Monitor
-    description: Health-check monitor service status
   - name: Reports
     description: Báo cáo & Email
   - name: Users
@@ -141,34 +150,35 @@ components:
         id:
           type: string
           format: uuid
-          example: "550e8400-e29b-41d4-a716-446655440000"
-        username:
-          type: string
-          example: admin01
+          example: "b0000000-0000-0000-0000-000000000001"
         email:
           type: string
-          example: admin@example.com
+          format: email
+          description: Danh tính đăng nhập. Hệ thống **không** có field `username`.
+          example: admin@vcs.com
         full_name:
           type: string
-          example: "Nguyen Van A"
+          example: "System Administrator"
         role:
           type: string
+          enum: [admin, operator, viewer]
           example: admin
         scopes:
           type: array
+          description: |
+            Scope của role, nhúng thẳng vào access token lúc login. Đây là lý do đổi
+            role chỉ có hiệu lực sau khi token cũ hết hạn hoặc user đăng nhập lại.
           items:
             type: string
           example: ["server:create", "server:list", "server:view", "server:update", "server:delete", "server:import", "server:export", "server:stats", "report:view", "report:send", "report:view_detail", "user:list", "user:manage_role"]
         is_active:
           type: boolean
           example: true
-        last_login_at:
-          type: string
-          format: date-time
-          example: "2026-06-10T08:00:00Z"
         created_at:
           type: string
           format: date-time
+          example: "2026-07-16T10:37:40.952254Z"
+      required: [id, email, full_name, role, scopes, is_active, created_at]
 
     # ── User Management ──
     UpdateUserRoleRequest:
@@ -371,6 +381,98 @@ components:
             $ref: '#/components/schemas/ServerResponse'
 
     # ── Import/Export ──
+    UptimeResponse:
+      type: object
+      description: |
+        Uptime của **ngày hiện tại theo giờ Việt Nam**, dựng từ bộ đếm Redis.
+        Bốn field đầu là trạng thái *hiện tại* (đọc PostgreSQL); phần còn lại là
+        phân bố uptime *hôm nay* (đọc Redis ZSET).
+      properties:
+        total_servers:
+          type: integer
+          example: 10000
+        servers_on:
+          type: integer
+          description: Trạng thái hiện tại, không phải hôm nay
+          example: 8876
+        servers_off:
+          type: integer
+          example: 1124
+        servers_unknown:
+          type: integer
+          description: Chưa từng được check (server mới tạo, hoặc Monitoring không chạy)
+          example: 0
+        servers_no_data:
+          type: integer
+          description: |
+            Server đang sống mà Monitoring **chưa từng chấm điểm** hôm nay.
+            Tính bằng `total_servers − ZCARD(monitor:uptime:index)`.
+          example: 0
+        servers_uptime_100:
+          type: integer
+          description: Uptime đúng 100% hôm nay
+          example: 0
+        servers_uptime_partial:
+          type: integer
+          description: Uptime trong khoảng (0, 100) hôm nay
+          example: 10000
+        servers_uptime_0:
+          type: integer
+          description: Uptime đúng 0% hôm nay — đã đo và OFF mọi lượt
+          example: 0
+        avg_uptime_pct:
+          type: number
+          format: double
+          nullable: true
+          description: |
+            Trung bình phần trăm uptime của **từng server đã được đo** hôm nay.
+            `null` khi chưa server nào được check.
+          example: 89.62
+        top_10_lowest_uptime:
+          type: array
+          description: 10 server uptime thấp nhất hôm nay. Mảng rỗng khi chưa có dữ liệu.
+          items:
+            $ref: '#/components/schemas/ServerUptimeRow'
+      required:
+        - total_servers
+        - servers_on
+        - servers_off
+        - servers_unknown
+        - servers_no_data
+        - servers_uptime_100
+        - servers_uptime_partial
+        - servers_uptime_0
+        - avg_uptime_pct
+        - top_10_lowest_uptime
+
+    ServerUptimeRow:
+      type: object
+      description: |
+        Uptime một server trong ngày hôm nay. Tên field `total_checks`/`on_checks`
+        được giữ cho hợp đồng với frontend; giá trị lấy từ `day_total`/`day_on`
+        trong `monitor:status:{server_id}`.
+      properties:
+        server_id:
+          type: string
+          example: "SRV-06126"
+        server_name:
+          type: string
+          description: Đọc từ PostgreSQL — chủ sở hữu của tên
+          example: "storage-0613"
+        uptime_pct:
+          type: number
+          format: double
+          example: 78.69
+        total_checks:
+          type: integer
+          description: Số lượt check hôm nay
+          example: 169
+        on_checks:
+          type: integer
+          description: Trong đó bao nhiêu lượt kết quả ON
+          example: 133
+      required: [server_id, server_name, uptime_pct, total_checks, on_checks]
+
     ImportResult:
       type: object
       properties:
@@ -441,6 +543,12 @@ components:
           type: string
         ipv4:
           type: string
+          description: Lọc theo **tiền tố** (`host(ipv4) LIKE ?`)
+        tcp_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Khớp chính xác
         os:
           type: string
         location:
@@ -451,6 +559,14 @@ components:
         sort_order:
           type: string
           enum: [asc, desc]
+        page:
+          type: integer
+          description: |
+            Bị bỏ qua khi export — service tự phân trang qua **toàn bộ** kết quả khớp
+            filter. Có ở đây vì export dùng lại đúng struct `ServerFilter` của `GET /servers`.
+        page_size:
+          type: integer
+          description: Bị bỏ qua khi export (xem `page`).
 
     ReportSummaryResponse:
       type: object
@@ -576,36 +692,26 @@ components:
 
     SendReportRequest:
       type: object
-      required: [start_date, end_date, email]
+      required: [start_date, end_date, recipient_email]
       properties:
         start_date:
           type: string
           format: date
-          example: "2026-06-01"
+          example: "2026-07-22"
         end_date:
           type: string
           format: date
-          example: "2026-06-07"
-        email:
+          description: |
+            Phải là một ngày **đã kết thúc** (nhỏ hơn hôm nay theo giờ VN), và khoảng
+            `[start_date, end_date]` không vượt `REPORT_MAX_RANGE_DAYS` (mặc định 31).
+          example: "2026-07-23"
+        recipient_email:
           type: string
           format: email
+          description: |
+            Phải thuộc một domain trong `SMTP_RECIPIENT_DOMAINS` nếu biến đó được set;
+            nếu không sẽ trả `422 REPORT_RECIPIENT_BLOCKED`.
           example: admin@company.com
-
-    SendReportResponse:
-      type: object
-      properties:
-        report_id:
-          type: string
-          format: uuid
-        status:
-          type: string
-          enum: [completed, failed]
-          example: completed
-        message:
-          type: string
-          example: "Report sent successfully"
-        summary:
-          $ref: '#/components/schemas/ReportSummaryResponse'
 
     # ── Common ──
     SuccessResponse:
@@ -1140,6 +1246,57 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /servers/uptime:
+    get:
+      tags: [Servers]
+      summary: Uptime của NGÀY HÔM NAY (giờ VN) cho toàn bộ fleet
+      description: |
+        Phục vụ dashboard realtime. Cache 10 giây (`server:uptime:cache`).
+
+        Số liệu lấy từ bộ đếm Redis mà Lua script cập nhật ngay trong mỗi lượt ping,
+        nên endpoint trả lời được **mọi lúc** — kể cả với fleet vừa khởi động 5 phút.
+        Không lệnh Redis nào scale theo số server (`ZCOUNT` / `ZRANGE`), nên nó trả
+        lời trong khoảng 0,1 giây với 10.000 server.
+
+        **Kỳ là NGÀY HIỆN TẠI theo `Asia/Ho_Chi_Minh`, tự reset lúc nửa đêm.** Đây là
+        con số **khác** với `GET /reports/summary`: báo cáo đọc `daily_snapshots` (các
+        ngày đã kết thúc), endpoint này đọc Redis (chỉ hôm nay).
+
+        `servers_no_data` = `total_servers` − số server đã được chấm điểm. Server vừa
+        tạo chưa qua vòng ping nào được **đếm riêng**, không bị coi là uptime 0%.
+
+        `avg_uptime_pct` là trung bình các phần trăm **từng server** (không phải
+        `Σon / Σtotal` toàn hệ thống) — cùng định nghĩa với `avg_uptime_pct` của báo cáo.
+
+        **Scope:** `server:stats`
+      operationId: getServerUptime
+      security:
+        - BearerAuth: [server:stats]
+      responses:
+        '200':
+          description: Uptime hôm nay
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UptimeResponse'
+        '401':
+          description: Thiếu JWT token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Thiếu scope `server:stats`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /servers/{server_id}:
     get:
       tags: [Servers]
@@ -1358,11 +1515,7 @@ paths:
                       data:
                         $ref: '#/components/schemas/ImportResult'
                       meta:
-                        type: object
-                        properties:
-                          duration_ms:
-                            type: integer
-                            example: 8120
+                        $ref: '#/components/schemas/MetaInfo'
         '400':
           description: Thiếu file hoặc thiếu `Idempotency-Key`
           content:
@@ -1512,7 +1665,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/SendReportResponse'
+                        $ref: '#/components/schemas/ReportJob'
         '400':
           description: Thiếu hoặc sai định dạng input
           content:

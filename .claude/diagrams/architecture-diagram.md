@@ -1,6 +1,7 @@
 # 🏗️ Sơ đồ kiến trúc — VCS-SMS
 
-> Cập nhật: 21/07/2026 — viết lại theo mã nguồn thực tế trong `server-management-system/`.
+> Cập nhật: 24/07/2026 — đối chiếu với mã nguồn trong `server-management-system/`
+> và với hệ thống đang chạy.
 
 ---
 
@@ -76,10 +77,15 @@ graph LR
     W -. "fact buffer" .-> ES[("Elasticsearch<br/>server-status-logs-*")]
 
     STREAM --> CONS["④ Consumer<br/>server-service"] --> PGS[("servers.status")]
-    ES -->|"⑤ agg 00:30 VN ⏰"| SNAP[("daily_snapshots")]
-    SNAP -->|"⑥ 10:00 VN ⏰"| MAIL["Email HTML + Excel"]
+    ES -->|"⑤ snapshot cron ⏰<br/>REPORT_SNAPSHOT_CRON"| SNAP[("daily_snapshots")]
+    SNAP -->|"⑥ daily cron ⏰<br/>REPORT_DAILY_CRON"| MAIL["Email HTML + Excel"]
     ST -->|"realtime"| DASH["Dashboard"]
 ```
+
+Giờ chạy của ⑤ và ⑥ là **cấu hình**, không phải hằng số: `REPORT_SNAPSHOT_CRON`
+(mặc định `30 0 * * *`) và `REPORT_DAILY_CRON` (mặc định `0 10 * * *`), cả hai theo
+giờ `Asia/Ho_Chi_Minh`. Điều kiện duy nhất: snapshot phải chạy trước daily report,
+và cả hai chỉ được nổ **tối đa một lần mỗi ngày**.
 
 **Vì sao tách kết quả thành hai đường (stream ↔ fact)?**
 
@@ -91,17 +97,17 @@ graph LR
 
 ```mermaid
 graph TB
-    subgraph L1["⚡ Redis — luỹ kế TRỌN ĐỜI"]
-        A1["monitor:status:{id}<br/>total_checks, on_checks"]
-        A2["monitor:uptime:index (ZSET)"]
+    subgraph L1["⚡ Redis — NGÀY HIỆN TẠI (giờ VN)"]
+        A1["monitor:status:{id}<br/>day, day_total, day_on"]
+        A2["monitor:uptime:index (ZSET)<br/>score = % uptime hôm nay"]
         A3["Dùng cho: dashboard realtime<br/>GET /servers/uptime"]
-        A4["⚠ Không có khái niệm 'ngày'.<br/>Đổi tỉ lệ simulator sẽ KHÔNG<br/>làm số này đổi ngay."]
+        A4["Lua tự reset 3 field trên<br/>ngay lần check đầu của ngày mới"]
     end
 
     subgraph L2["🔍 Elasticsearch — FACT THÔ"]
         B1["1 document = 1 lượt ping<br/>~14,4 triệu doc/ngày"]
         B2["Index đặt tên theo ngày UTC"]
-        B3["Dùng cho: DUY NHẤT snapshot job,<br/>1 lần/ngày lúc 00:30"]
+        B3["Dùng cho: DUY NHẤT snapshot job,<br/>1 lần/ngày"]
     end
 
     subgraph L3["🐘 PostgreSQL — KẾT TINH THEO NGÀY"]
@@ -111,15 +117,27 @@ graph TB
     end
 
     L1 -.->|"độc lập"| L2
-    L2 -->|"composite agg<br/>00:30 VN"| L3
+    L2 -->|"composite agg<br/>snapshot cron"| L3
 ```
 
 | | Redis | Elasticsearch | PostgreSQL |
 |---|---|---|---|
-| Phạm vi thời gian | trọn đời | mỗi lượt ping | mỗi ngày |
+| Phạm vi thời gian | ngày hiện tại (VN) | mỗi lượt ping | mỗi ngày đã kết thúc |
 | Ai ghi | Lua script (monitor) | FactBuffer (monitor) | Snapshot job (report) |
 | Ai đọc | dashboard | snapshot job | báo cáo + email |
-| Mất dữ liệu thì sao | mất số đếm, không khôi phục được | coverage giảm | báo cáo bị TỪ CHỐI |
+| Mất dữ liệu thì sao | mất số đếm của **hôm nay** | coverage giảm | báo cáo bị TỪ CHỐI |
+
+**Vì sao Redis đếm theo ngày chứ không luỹ kế trọn đời?** Bản trước đếm trọn đời, và
+dashboard trở nên vô dụng sau vài ngày chạy: một server chết cả hôm nay vẫn hiện 92%
+vì lịch sử tốt đẹp của tuần trước, và AOF mang con số đó qua mọi lần restart. Lua giữ
+thêm field `day` (YYYY-MM-DD theo giờ VN); khi lần check đầu tiên của ngày mới thấy
+`day` khác, nó đặt lại `day_total`/`day_on` về 0. Chi phí: **0 round-trip thêm** —
+script đã `HSET` lên đúng key đó rồi.
+
+> Hệ quả có thể quan sát: đổi `SIMULATOR_DEFAULT_UPTIME_RATE` sẽ thấy dashboard đổi
+> theo trong vòng một ngày, không cần xoá key thủ công. Nếu `monitor:status:{id}` của
+> bạn còn field `total_checks`/`on_checks`, đó là **rác từ bản cũ** còn nằm trong AOF —
+> không code nào đọc hay ghi chúng nữa.
 
 ---
 
@@ -149,13 +167,26 @@ graph TB
     end
 
     subgraph M4["📮 Gửi mail không nhân đôi"]
-        D1["job row tồn tại TRƯỚC khi gửi"]
-        D2["lỗi rõ ràng → failed"]
-        D3["lỗi mập mờ → delivery_unknown<br/>giữ Message-ID, KHÔNG tự retry"]
-        D1 --> D2
-        D1 --> D3
+        D1["cron_runs: 1 dòng = 1 job × 1 ngày<br/>PK là trọng tài duy nhất"]
+        D2["job row tồn tại TRƯỚC khi gửi"]
+        D3["lỗi rõ ràng → failed"]
+        D4["lỗi mập mờ → delivery_unknown<br/>giữ Message-ID, KHÔNG tự retry"]
+        D1 --> D2 --> D3
+        D2 --> D4
     end
 ```
+
+**Chi tiết M4 — ba lớp, vì một lớp là không đủ:**
+
+| Lớp | Cơ chế | Chặn được gì |
+|---|---|---|
+| 1 | `INSERT INTO cron_runs (job_name, run_date)` — PK xung đột thì thua | 3 replica cùng nổ cron lúc 10:00 |
+| 2 | `FindLatestDaily(date)` + `resendable(state)` | Replica trước đã chết **sau** khi mail lên dây nhưng **trước** khi ghi kết quả |
+| 3 | `Idempotency-Key` trên `POST /reports` (tuỳ chọn) | Người dùng bấm nút hai lần |
+
+Lớp 1 một mình không đủ: claim có thể bị "cướp" hợp lệ sau `staleAfter` = 3 phút
+(6 nhịp heartbeat bị bỏ), và replica cướp được không có cách nào biết mail đã đi hay
+chưa. Đó là việc của lớp 2.
 
 ---
 
@@ -188,4 +219,6 @@ graph TB
 | 4 | **Lua script** cho ghi trạng thái | Ghi status + counter + stream nguyên tử — không có khe hở để Redis và stream bất đồng |
 | 5 | **Snapshot theo ngày** thay vì query ES lúc gửi báo cáo | Báo cáo đọc 10.000 dòng thay vì 14 triệu document |
 | 6 | **Population đọc từ Server Service**, không suy ra từ fact | Server không ai ping được vẫn phải xuất hiện trong báo cáo — nếu suy từ fact thì lỗ hổng biến mất |
-| 7 | **Múi giờ VN chỉ ở Report Service** | Monitoring và ES thuần UTC; quy đổi tập trung một chỗ, tránh lệch ngày rải rác |
+| 7 | **Múi giờ VN cho mọi ranh giới ngày** | ES đặt tên index theo UTC, nhưng ngày của báo cáo và của bộ đếm uptime đều là ngày VN — quy đổi bằng `shared/timezone` để không có hai định nghĩa "hôm nay" |
+| 8 | **Leader election bằng một dòng PostgreSQL** (`cron_runs`), không dùng Redis lock cho cron | Cron là việc **một lần mỗi ngày**, không phải mỗi phút. PK của bảng là trọng tài bền vững; Redis lock hết TTL là mất dấu vết, còn dòng `cron_runs` để lại lịch sử chạy để kiểm tra sau |
+| 9 | **Bộ đếm uptime reset theo ngày VN** thay vì luỹ kế trọn đời | Dashboard trả lời "hôm nay thế nào", nên số đếm phải quên quá khứ. Lịch sử thật đã nằm ở `daily_snapshots` |

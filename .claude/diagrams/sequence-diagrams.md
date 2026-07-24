@@ -1,6 +1,6 @@
 # 🔄 Sơ đồ tuần tự — 8 luồng nghiệp vụ
 
-> Cập nhật: 21/07/2026
+> Cập nhật: 24/07/2026
 
 | # | Luồng | Kích hoạt |
 |---|-------|-----------|
@@ -9,7 +9,7 @@
 | [3](#3-lan-truyền-thay-đổi-trạng-thái-redis--postgresql) | Lan truyền đổi trạng thái | tự động |
 | [4](#4-import-10000-server-từ-excel) | Import Excel | người dùng |
 | [5](#5-export-theo-đúng-bộ-lọc-đang-áp-dụng) | Export theo bộ lọc | người dùng |
-| [6](#6-snapshot-hằng-ngày--0030-giờ-vn-) | Snapshot hằng ngày ⏰ | cron |
+| [6](#6-snapshot-hằng-ngày-) | Snapshot hằng ngày ⏰ | cron (có leader election) |
 | [7](#7-gửi-báo-cáo-kèm-file-excel) | Gửi báo cáo + Excel | cron / người dùng |
 | [8](#8-dashboard-uptime-thời-gian-thực) | Dashboard realtime | người dùng |
 
@@ -85,12 +85,16 @@ sequenceDiagram
     participant L as statusScript
     participant K as Redis<br/>status · uptime · stream
 
-    W->>L: (server_id, status, round_id)
+    W->>L: KEYS status·stream·uptime<br/>ARGV server_id, status, checked_at,<br/>latency, round_id, day(VN)
     alt round_id ≤ round cũ
         L-->>W: 0 — bỏ qua, KHÔNG ghi gì
     else mới hơn
-        L->>K: HSET status + HINCRBY counter + ZADD uptime
-        alt lần đầu HOẶC status khác cũ
+        L->>K: HSET status, last_checked_at, latency_ms, round_id
+        opt field 'day' khác ARGV day
+            L->>K: HSET day, day_total=0, day_on=0 — SANG NGÀY MỚI
+        end
+        L->>K: HINCRBY day_total (+ day_on nếu ON) → ZADD uptime %
+        alt lần đầu (old_status == false) HOẶC status khác cũ
             L->>K: XADD stream.changed
             L-->>W: 1 — ĐÃ ĐỔI
         else giống hệt
@@ -99,11 +103,17 @@ sequenceDiagram
     end
 ```
 
-Đếm counter nằm **sau** chốt chặn round cũ nên phát lại không thổi phồng số. Ghi status,
-cộng counter và đẩy stream gói trong **một** lệnh Redis — không có khe hở để Redis và
-stream bất đồng.
+Ghi status, reset/cộng bộ đếm ngày, cập nhật ZSET và đẩy stream nằm trong **một** lệnh
+Redis. Nếu tách rời, sẽ có khe hở mà Redis nói "server ON" còn stream chưa hề báo — hoặc
+ngược lại.
 
-Ghi status, cộng counter và đẩy stream nằm trong **một** lệnh Redis. Nếu tách rời, sẽ có khe hở mà Redis nói "server ON" còn stream chưa hề báo — hoặc ngược lại.
+Bộ đếm nằm **sau** chốt chặn round cũ, nên một round phát lại hay tới muộn không thổi
+phồng số. `day` do Go tính theo `Asia/Ho_Chi_Minh` rồi truyền vào, không phải Lua tự lấy
+giờ — `redis.call('TIME')` trả UTC, và dùng nó sẽ làm bộ đếm reset lúc 7 giờ sáng VN.
+
+`old_status == false`, **không** `== nil`: Redis Lua trả `false` cho field không tồn tại.
+Viết `nil` thì điều kiện vĩnh viễn sai, event đầu tiên (`UNKNOWN → ON/OFF`) không bao giờ
+phát, và server mới kẹt `UNKNOWN` mãi mãi trong PostgreSQL.
 
 ---
 
@@ -203,33 +213,57 @@ sequenceDiagram
 
 ---
 
-## 6. Snapshot hằng ngày — 00:30 giờ VN ⏰
+## 6. Snapshot hằng ngày ⏰
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as cron 00:30 VN
+    participant SC as Scheduler<br/>(mọi replica, tick 60s)
+    participant CR as cron_runs
     participant J as snapshot.Job
     participant SS as server-service
     participant ES as Elasticsearch
     participant PG as report_db
 
-    C->>J: RunYesterday — cửa sổ [00:00, 24:00) hôm qua (VN)
-    J->>SS: ① GET /internal/servers → dân số (KHÔNG suy từ fact)
-    loop ② composite agg + after_key
-        J->>ES: bucket theo server_id · on_checks · fact cuối
+    SC->>SC: due(REPORT_SNAPSHOT_CRON, now)? — giờ nổ hôm nay đã qua chưa
+    SC->>CR: TryClaim("snapshot", hôm_qua, hostname, staleAfter=3m)
+    alt thua claim
+        CR-->>SC: false — replica khác đang/đã làm, dừng
+    else thắng claim
+        CR-->>SC: true (state=running, owner=tôi)
+        par heartbeat
+            SC->>CR: UPDATE heartbeat_at = NOW() mỗi 30s<br/>mất claim → cancel job đang chạy
+        and công việc thật
+            SC->>J: Run(hôm_qua) — cửa sổ [00:00, 24:00) giờ VN
+            J->>SS: ① GET /internal/servers?created_before=&deleted_after=<br/>→ dân số (KHÔNG suy từ fact)
+            loop ② composite agg + after_key, size 1000
+                J->>ES: bucket theo server_id · on_checks · last_fact
+            end
+            J->>J: ③ LEFT JOIN dân số ⟕ số đo<br/>có fact → uptime = on/actual · không → NULL (no-data)
+            note right of J: server no-data vẫn tính expected ⇒ tự kéo coverage xuống
+            J->>PG: ④ UPSERT daily_snapshots theo lô (chạy lại an toàn)
+            J-->>SC: {servers, servers_no_data, coverage_pct}
+        end
+        SC->>CR: MarkDone WHERE owner = tôi
     end
-    J->>J: ③ LEFT JOIN dân số ⟕ số đo<br/>có fact → uptime = on/actual · không → NULL (no-data)
-    note right of J: server no-data vẫn tính expected ⇒ tự kéo coverage xuống
-    J->>PG: UPSERT daily_snapshots theo lô 500 (chạy lại an toàn)
-    J-->>C: {servers, servers_no_data, coverage_pct}
 ```
 
 **Vì sao dân số phải đọc từ Server Service?** Một server *không ai ping được* vẫn phải xuất hiện trong báo cáo. Nếu suy dân số từ chính đống fact, server đó biến mất — và lỗ hổng giám sát tự xoá dấu vết của nó.
 
-**Chạy lại thủ công khi job đêm hỏng:**
-```
-POST /internal/snapshots/2026-07-17
+Endpoint nội bộ nhận **hai** tham số bắt buộc, cả hai RFC3339:
+`created_before` = 00:00 ngày kế tiếp, `deleted_after` = 00:00 ngày cần snapshot. Đó chính
+là điều kiện "server này có tồn tại trong ngày đó không". Trả về theo cursor
+(`next_cursor` = `server_id` cuối), tối đa 1000 dòng mỗi trang → ~10 request cho 10.000 server.
+
+**Vì sao `TryClaim` chứ không chỉ dựa vào cron nổ một lần?** `report-service` chạy 3
+replica, mỗi replica có scheduler riêng. Không có claim thì 3 replica cùng aggregate 14,4
+triệu document và cùng UPSERT — vô hại về dữ liệu (UPSERT idempotent) nhưng tốn 3 lần tài
+nguyên và làm Elasticsearch nghẹt.
+
+**Chạy lại thủ công khi job đêm hỏng** (không đi qua Traefik, không cần claim):
+```bash
+docker exec vcs-sms-traefik wget -qO- --post-data='' \
+  http://report-service:8084/internal/snapshots/2026-07-23
 ```
 
 ---
@@ -239,19 +273,30 @@ POST /internal/snapshots/2026-07-17
 ```mermaid
 sequenceDiagram
     autonumber
-    actor U as Operator / ⏰ cron 10:00
+    actor U as Operator / ⏰ Scheduler
     participant SS as SendService
     participant RS as ReportService
     participant PG as report_db
     participant SM as GmailSender
 
-    U->>SS: Send(range, recipient)
-    SS->>RS: ParseRange — end_date phải ĐÃ kết thúc · ≤ 31 ngày
+    U->>SS: Send(range, recipient, reportType, requesterID, idemKey)
+    SS->>RS: ParseRange — end_date phải ĐÃ kết thúc · ≤ REPORT_MAX_RANGE_DAYS
+    opt có Idempotency-Key
+        SS->>PG: FindByIdempotency(requesterID, key)
+        alt tìm thấy, cùng nội dung
+            PG-->>SS: job cũ → REPLAY, dừng ở đây
+        else tìm thấy, khác nội dung
+            PG-->>SS: ErrIdempotencyConflict
+        end
+    end
     SS->>PG: Create job (state=processing) — có TRƯỚC khi gửi
+    note right of PG: ux_report_jobs_idem là partial unique index;<br/>insert bị chối ⇒ replica khác vừa giành key ⇒ replay
     SS->>RS: Summary
     RS->>PG: MissingDates? → từ chối + nêu ngày thiếu
     RS-->>SS: total · avg_uptime · coverage · top10
-    SS->>SS: render HTML + sinh Excel (đính kèm là phụ trợ, hỏng vẫn gửi)
+    SS->>PG: state=generated, lưu response_json
+    SS->>SS: render HTML → state=sending
+    SS->>SS: sinh Excel (đính kèm là phụ trợ, hỏng vẫn gửi — chỉ log WARN)
     SS->>SM: STARTTLS → AUTH → DATA
     alt 250 OK
         SM-->>SS: sent + Message-ID
@@ -261,6 +306,27 @@ sequenceDiagram
         SM-->>SS: delivery_unknown — giữ Message-ID, KHÔNG retry
     end
 ```
+
+### Đường tự động có thêm một chốt mà đường người dùng không có
+
+```mermaid
+graph LR
+    A["Scheduler tick"] --> B{"IsDone('snapshot', hôm_qua)?"}
+    B -->|"chưa"| Z["bỏ qua tick này"]
+    B -->|"rồi"| C{"TryClaim('daily_report', hôm_qua)"}
+    C -->|"thua"| Z
+    C -->|"thắng"| D{"FindLatestDaily(hôm_qua)<br/>đã có job nào chưa?"}
+    D -->|"có, state KHÔNG resendable"| E["log WARN, KHÔNG gửi lại"]
+    D -->|"chưa, hoặc processing/generated/failed"| F["SendService.Send"]
+```
+
+`resendable(state)` chỉ nhận `processing`, `generated`, `failed` — ba trạng thái mà body
+**chưa** lên dây. `sending` **không** resendable, vì nó được ghi *trước* khi gọi SMTP: một
+replica chết đúng khoảng đó thì không ai biết mail đã đi hay chưa, và đoán "chưa" là cách
+gửi hai lần.
+
+Đây là lý do claim `cron_runs` một mình không đủ. Claim chỉ bảo đảm "cùng một lúc chỉ một
+replica chạy"; nó không nói gì về "lần chạy trước đã làm tới đâu".
 
 **Số liệu lượt kiểm tra khớp nhau ở hai nơi:**
 - Thân email: `ActualChecks` = **tổng** toàn hệ thống (ví dụ 1.110.043).
@@ -279,17 +345,43 @@ sequenceDiagram
     participant S as server-service
     participant UR as UptimeReader
     participant RD as Redis db1
+    participant PG as server_db
 
-    U->>W: mở /reports
+    U->>W: mở / (dashboard)
     W->>S: GET /api/v1/servers/uptime 🔒 server:stats
-    S->>UR: đọc phân bố
-    UR->>RD: ZCOUNT monitor:uptime:index 100 100
-    UR->>RD: ZCOUNT ... 0 0
-    UR->>RD: ZRANGE ... 0 9 WITHSCORES
-    RD-->>UR: phân bố + 10 server tệ nhất
-    S-->>W: uptime realtime
+    note right of S: cache server:uptime:cache TTL 10s<br/>→ hit thì trả ngay
+    S->>PG: GetStats — COUNT theo status (cache 10s)
+    S->>UR: Stats(worstN = 10) — MỘT pipeline
+    UR->>RD: ZCARD · ZCOUNT 100 100 · ZCOUNT 0 0 · ZCOUNT (0 (100
+    UR->>RD: ZRANGE 0 9 WITHSCORES
+    UR->>RD: HMGET monitor:status:{id} day_total day_on (pipeline)
+    RD-->>UR: phân bố + 10 server tệ nhất + số đếm thô
+    S->>PG: FindByServerID cho 10 server đó — lấy server_name
+    S-->>W: uptime của HÔM NAY
 ```
 
-> ⚠️ **Con số này là LUỸ KẾ TRỌN ĐỜI**, không phải "hôm nay". Đổi `SIMULATOR_DEFAULT_UPTIME_RATE` từ 0,95 xuống 0,75 sẽ **không** làm dashboard đổi ngay — số đếm cũ vẫn nằm đó. Muốn thấy tỉ lệ mới cần xoá `monitor:status:*` và `monitor:uptime:index` để đếm lại từ đầu.
+> **Con số này là uptime của NGÀY HÔM NAY theo giờ Việt Nam**, không phải luỹ kế trọn đời.
+> Lua giữ field `day` trong `monitor:status:{id}`; lần check đầu tiên của ngày mới thấy
+> `day` khác thì đặt lại `day_total`/`day_on` về 0, nên toàn bộ ZSET tự làm mới trong
+> **một round** sau nửa đêm.
 >
-> Đây là con số **khác** với uptime trong email: email đọc `daily_snapshots` (cắt theo từng ngày), dashboard đọc Redis (trọn đời).
+> Hệ quả: đổi `SIMULATOR_DEFAULT_UPTIME_RATE` sẽ thấy dashboard hội tụ về tỉ lệ mới trong
+> vòng một ngày, **không** cần xoá key thủ công.
+
+**Ba con số, ba nguồn — trong cùng một response:**
+
+| Nhóm field | Nguồn | Ý nghĩa |
+|---|---|---|
+| `total_servers`, `servers_on/off/unknown` | PostgreSQL `COUNT(*)` theo `status` | trạng thái **hiện tại** |
+| `servers_uptime_100/partial/0`, `avg_uptime_pct`, `top_10_lowest_uptime` | Redis ZSET | uptime **hôm nay** |
+| `servers_no_data` | `total_servers − ZCARD` | server Monitoring chưa từng chấm điểm |
+
+`servers_no_data` được **trừ ra**, không đoán: một server vừa tạo chưa qua round nào thì
+không có mặt trong ZSET, và nó phải được đếm riêng chứ không bị coi là uptime 0%.
+
+`server_name` lấy từ PostgreSQL chứ không từ Redis, vì PostgreSQL là chủ sở hữu của tên.
+Cái giá: 10 truy vấn `FindByServerID` cho đúng 10 dòng của bảng xếp hạng.
+
+> Đây là con số **khác** với uptime trong email: email đọc `daily_snapshots` (mọi ngày đã
+> kết thúc, cắt theo khoảng người dùng chọn), dashboard đọc Redis (chỉ hôm nay, có ngay
+> mọi lúc kể cả khi chưa có snapshot nào).

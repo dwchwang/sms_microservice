@@ -1,6 +1,8 @@
 # 👥 Sơ đồ use case & phân quyền
 
-> Cập nhật: 21/07/2026 · Nguồn: `init.sql` (seed roles/scopes) + `RequireScope(...)` trong các `cmd/main.go`.
+> Cập nhật: 24/07/2026 · Nguồn: `init.sql` (seed roles/scopes) + `RequireScope(...)` trong
+> các `cmd/main.go` — đã kiểm lại bằng một tài khoản `viewer` thật (`POST /servers` → 403,
+> `GET /servers` → 200).
 
 ---
 
@@ -135,19 +137,21 @@ graph LR
 ```mermaid
 graph TB
     subgraph AUTO["⏰ Tự động"]
-        C1["cron 10:00 giờ VN"]
+        C1["Scheduler, REPORT_DAILY_CRON<br/>(mặc định 0 10 * * * giờ VN)"]
         C2["khoảng = hôm qua → hôm qua"]
         C3["người nhận = REPORT_DAILY_RECIPIENT"]
         C4["requester_id = 'scheduler'"]
         C5["report_type = 'daily'"]
+        C6["idempotency_key = '' (rỗng)<br/>bảo vệ bằng cron_runs + resendable()"]
     end
 
     subgraph MAN["👤 Theo yêu cầu"]
         M1["operator bấm nút ở /reports"]
-        M2["khoảng tuỳ chọn, tối đa 31 ngày"]
+        M2["khoảng tuỳ chọn, ≤ REPORT_MAX_RANGE_DAYS"]
         M3["người nhận do người dùng nhập"]
         M4["requester_id = user id thật"]
         M5["report_type = 'on-demand'"]
+        M6["idempotency_key = header (TUỲ CHỌN)"]
     end
 
     SAME["SendService.Send()<br/>CÙNG một hàm"]
@@ -158,6 +162,15 @@ graph TB
 ```
 
 Cả hai dùng chung `SendService.Send()`, chung template `daily_report.html`, chung `excel.Generator`. Khác nhau chỉ ở khoảng ngày, người nhận và metadata ghi vào `report_jobs`.
+
+> ⚠️ **`POST /reports` KHÔNG bắt buộc `Idempotency-Key`** — khác với `POST /servers` và
+> `POST /servers/import`. Nếu client gửi header, `SendService` dùng nó để replay job cũ
+> (và trả `ErrIdempotencyConflict` nếu cùng key mà khác nội dung); nếu không gửi, request
+> tạo job mới bình thường. Đó là lý do `ux_report_jobs_idem` là **partial** unique index
+> với `WHERE idempotency_key <> ''`.
+>
+> Đường tự động không dùng key nào cả — nó được bảo vệ bằng hai lớp khác:
+> claim trong `cron_runs` và `resendable(state)`.
 
 **Ràng buộc chung cho cả hai:** `end_date` bắt buộc phải là một ngày **đã kết thúc**. Báo cáo cho ngày hôm nay bị từ chối, vì snapshot của một ngày chỉ tồn tại sau khi ngày đó khép lại (job 00:30 hôm sau).
 

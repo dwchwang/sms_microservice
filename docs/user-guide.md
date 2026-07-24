@@ -1,6 +1,28 @@
+> # ⛔ TÀI LIỆU ĐÃ LỖI THỜI — GIỮ LẠI LÀM LỊCH SỬ
+>
+> Hướng dẫn này viết cho kiến trúc **Checkpoint 1** và **không còn dùng được**. Làm theo nó
+> sẽ gặp lỗi ngay từ bước đăng nhập.
+>
+> **Những chỗ sai ảnh hưởng trực tiếp tới người dùng:**
+>
+> | Bản này | Hệ thống hiện tại |
+> |---|---|
+> | Đăng nhập bằng `username` | Đăng nhập bằng **`email`** (`admin@vcs.com`) |
+> | Import bất đồng bộ qua Kafka, trả `job_id` để poll | Import **đồng bộ**, trả kết quả ngay trong response |
+> | `GET /api/v1/monitor/status` | **Không tồn tại** — monitor không có endpoint public |
+> | Swagger UI tại `/swagger/index.html` | **Không có** — spec là file `docs/api-spec.yaml` |
+> | `SMTP_ADMIN_EMAIL`, `SERVER_ALLOWED_CIDRS` | `REPORT_DAILY_RECIPIENT`, `SERVER_CIDR_ALLOWLIST` |
+>
+> **Hãy đọc thay thế:** [BaoCao-HuongDanSuDung.md](./BaoCao-HuongDanSuDung.md) — hướng dẫn
+> sử dụng hiện hành, mọi lệnh đã được chạy thật trên hệ thống đang hoạt động.
+>
+> *(Ghi chú thêm ngày 24/07/2026.)*
+
+---
+
 # Hướng dẫn sử dụng VCS-SMS
 
-> **Phiên bản:** 1.0 | **Ngày:** 2026-06-12
+> **Phiên bản:** 1.0 | **Ngày:** 2026-06-12 — ⛔ **đã bị thay thế, xem banner ở đầu file**
 
 Hướng dẫn này giúp bạn cài đặt, cấu hình và sử dụng toàn bộ tính năng của hệ thống VCS Server Management System.
 

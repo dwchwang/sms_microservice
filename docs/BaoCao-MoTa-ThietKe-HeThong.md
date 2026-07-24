@@ -2,8 +2,8 @@
 ## VCS Server Management System (VCS-SMS)
 
 > **Chương trình:** VCS Passport
-> **Phiên bản:** 2.0 — thiết kế sau refactor
-> **Ngày:** 2026-07-17
+> **Phiên bản:** 2.1 — thiết kế sau refactor, bổ sung HA cho report-service
+> **Ngày:** 2026-07-24
 > **Ngôn ngữ:** Go 1.24+ (service dùng Go 1.25)
 > **Kiến trúc:** 4 microservice + Traefik ForwardAuth + Redis Stream + database-per-service
 
@@ -59,7 +59,9 @@ stream — event chỉ mang `ON` hoặc `OFF`.
 | 2 | **Redis Stream thay Kafka** | 1 event, 1 producer, 1 consumer group, vài chục event/ngày — Kafka là chi phí không đổi lấy được gì |
 | 3 | **Traefik ForwardAuth thay Gateway tự viết** | Không tự viết lại routing / rate-limit / TLS |
 | 4 | **Round-based monitoring** | `round_id` từ Redis TIME cho nhiều instance thống nhất mà không cần điều phối |
-| 5 | **Snapshot 00:30 thay aggregate on-demand** | Report đọc bảng đã cô đọng → ES chết không làm chết report |
+| 5 | **Snapshot hằng ngày thay aggregate on-demand** | Report đọc bảng đã cô đọng → ES chết không làm chết report |
+| 6 | **Leader election bằng một dòng bảng** (`cron_runs`) | report-service chạy 3 replica; PK của bảng là trọng tài bền vững, lại để lại lịch sử chạy để kiểm tra sau |
+| 7 | **Bộ đếm uptime reset theo ngày VN** | Dashboard trả lời "hôm nay thế nào", nên số đếm phải quên quá khứ; lịch sử thật đã nằm ở `daily_snapshots` |
 
 ### 1.4. Luận điểm trung tâm
 
@@ -90,15 +92,16 @@ Toàn bộ giá trị của Redis Stream + Lua script nằm ở chỗ này.
 | Yêu cầu | Giải pháp hiện tại |
 |---|---|
 | OpenAPI | OpenAPI 3.0.3 (`docs/api-spec.yaml`) |
-| Unit test | **406 test**, 6/6 module `build` + `vet` + `test` xanh |
+| Unit test | **455 test**, 6/6 module `build` + `vet` + `test` xanh |
 | Chống SQL Injection | GORM parameterized; raw SQL chỉ ở các truy vấn aggregate và đều bind tham số |
 | Error handling | Mã lỗi + mô tả, format response chuẩn |
 | Log ra file + rotate | zerolog (JSON) + lumberjack |
 | JWT + scope per API | ForwardAuth (authn) + `RequireScope` trong service (authz) |
-| Elasticsearch tính uptime | Composite aggregation lúc 00:30 → `daily_snapshots` |
+| Elasticsearch tính uptime | Composite aggregation một lần mỗi ngày → `daily_snapshots` |
 | PostgreSQL | PostgreSQL 17, **3 database tách rời** |
-| Redis | Cache-aside, target projection, round queue, status, stream, bộ đếm uptime luỹ kế |
+| Redis | Cache-aside, target projection, round queue, status, stream, bộ đếm uptime **theo ngày VN** |
 | Metrics | 7 metric Prometheus tại `/metrics` của monitor |
+| HA / scale-out | 4/4 service scale ngang được; `docker-stack.yml` chạy auth ×2, server ×2, monitor ×3, report ×3 |
 
 ### 2.3. Thông tin một Server
 
@@ -238,13 +241,29 @@ xác định*, không phải 0%. NULL giữ nó ngoài `AVG()` và đưa vào `s
 
 **`api_idempotency`** (server_db) — PK `(actor_id, endpoint, idempotency_key)`
 
-**`report_jobs`** (report_db) — state: `processing`/`generated`/`sending`/`sent`/`failed`/`delivery_unknown`
+**`report_jobs`** (report_db) — state: `processing`/`generated`/`sending`/`sent`/`failed`/`delivery_unknown`.
+Có thêm `ux_report_jobs_idem` là **partial** unique index trên
+`(requester_id, idempotency_key) WHERE idempotency_key <> ''` — vì `POST /reports` **không
+bắt buộc** `Idempotency-Key`.
+
+**`cron_runs`** (report_db) — PK `(job_name, run_date)`, state `running`/`done`/`failed`.
+Đây là toàn bộ cơ chế leader election của report-service: PK của bảng là trọng tài duy
+nhất, `run_date` là *ngày dữ liệu* (luôn là hôm qua) nên một job chỉ chạy đúng một lần cho
+mỗi ngày, và `heartbeat_at` phân biệt job chạy chậm với replica đã chết. Xem §8.5.
 
 ### 4.3. Redis & Elasticsearch
 
-Redis: target projection (`server:monitor-target:*`), round (`monitor:round:*`,
-`monitor:ping:queue:*`), status (`monitor:status:*`), stream, cache (`server:list:*`).
+Redis dùng **hai database**: `db0` cho auth (`auth:refresh:*`, `auth:blacklist:*`,
+`auth:login_attempts:*`), `db1` cho phần còn lại — target projection
+(`server:monitor-target:*`), round (`monitor:round:*`, `monitor:ping:queue:*`), status
+(`monitor:status:*`), bộ đếm uptime (`monitor:uptime:index`), stream, và cache
+(`server:list:*`, `server:detail:*`, `server:stats:cache`, `server:uptime:cache`).
 Mỗi namespace có **một** owner.
+
+`monitor:status:{id}` giữ bảy field: `status`, `last_checked_at`, `latency_ms`, `round_id`,
+`day`, `day_total`, `day_on`. Ba field cuối là bộ đếm uptime **của ngày hiện tại theo giờ
+VN** — Lua tự đặt lại về 0 ở lần check đầu tiên của ngày mới, nên dashboard đọc "hôm nay"
+chứ không phải một tổng luỹ kế mà AOF mang qua mọi lần restart.
 
 Elasticsearch: `server-status-logs-YYYY.MM.DD`, `_id = {server_id}:{round_id}` tất định
 để retry bulk không nhân bản. Mapping `keyword` do index template cài — để ES tự map
@@ -469,6 +488,48 @@ lần; Message-ID được giữ lại để operator tự tra hộp Sent.
 
 → [09-flow-reporting-email.md](./09-flow-reporting-email.md)
 
+### 8.5. Report-service chạy nhiều replica — ba lớp chống gửi trùng
+
+`report-service` là service duy nhất có **state theo thời gian** (hai cron job), nên nó là
+service duy nhất cần trọng tài khi scale. `docker-stack.yml` chạy nó với `replicas: 3`, và
+**mọi** replica đều chạy scheduler.
+
+```mermaid
+graph LR
+    T["mỗi replica: tick 60s"] --> D{"due(cron, now)?"}
+    D -->|"chưa"| Z["bỏ qua"]
+    D -->|"rồi"| DEP{"dependsOn done?<br/>(daily_report cần snapshot)"}
+    DEP -->|"chưa"| Z
+    DEP -->|"rồi"| C{"TryClaim(job, hôm_qua)"}
+    C -->|"thua"| Z
+    C -->|"thắng"| R["chạy job + heartbeat 30s"]
+    R --> M["MarkDone / MarkFailed<br/>WHERE owner = tôi"]
+```
+
+| Lớp | Cơ chế | Chặn được gì |
+|---|---|---|
+| 1 | PK `(job_name, run_date)` của `cron_runs` | 3 replica cùng nổ cron |
+| 2 | `FindLatestDaily` + `resendable(state)` | Replica trước chết **sau** khi mail lên dây nhưng **trước** khi ghi kết quả |
+| 3 | `Idempotency-Key` (tuỳ chọn) trên `POST /reports` | Người dùng bấm nút hai lần |
+
+**Scheduler *reconcile* mỗi phút, không nổ đúng khoảnh khắc cron.** `robfig/cron` chỉ dùng
+để parse biểu thức. Nổ theo callback thì một replica boot lúc 10:05 sẽ không bao giờ biết
+job 10:00 chưa ai làm; reconcile thì nó thấy `due` = true, `cron_runs` chưa có dòng `done`,
+và tự nhận việc. Đây là điều làm cho một lần deploy giữa giờ cron không mất báo cáo.
+
+| Tham số | Giá trị |
+|---|---|
+| `tickInterval` | 60s |
+| `heartbeatInterval` | 30s |
+| `staleAfter` | 3 phút (6 nhịp bị bỏ) |
+| `snapshotTimeout` / `dailyTimeout` | 1 giờ / 10 phút |
+
+`heartbeat` chạy hai chiều: làm mới claim, **và** cancel context của job đang chạy khi phát
+hiện claim đã bị cướp. Không có chiều thứ hai, một replica treo mạng 4 phút rồi hồi phục sẽ
+tiếp tục ghi vào cùng `run_date` mà replica mới đang xử lý.
+
+`sending` **không** resendable dù nghe như "chưa xong": nó được ghi *trước* khi gọi SMTP.
+
 ---
 
 ## 9. Caching
@@ -477,15 +538,20 @@ Ba tầng dữ liệu uptime, ba mục đích khác nhau — đừng nhầm lẫ
 
 ```mermaid
 graph LR
-    L["1 lượt ping"] --> RDS[("Redis<br/>luỹ kế TRỌN ĐỜI<br/>→ dashboard realtime")]
+    L["1 lượt ping"] --> RDS[("Redis<br/>bộ đếm NGÀY HÔM NAY (VN)<br/>→ dashboard realtime")]
     L --> ES[("Elasticsearch<br/>fact thô mỗi ping<br/>ILM 7 ngày")]
-    ES -->|"composite agg<br/>00:30 VN"| PG[("PostgreSQL<br/>daily_snapshots<br/>→ mọi báo cáo + email")]
+    ES -->|"composite agg<br/>1 lần/ngày"| PG[("PostgreSQL<br/>daily_snapshots<br/>→ mọi báo cáo + email")]
 ```
 
 ```text
-server:list:cache:{query_hash}:{list_version}
+server:list:cache:{query_hash}:{list_version}   TTL 30s
+server:detail:cache:{server_id}:{list_version}  TTL 30s
 server:stats:cache                              TTL 10s
+server:uptime:cache                             TTL 10s
 ```
+
+Hai key đầu có version **trong key**; hai key sau chỉ dựa vào TTL vì chúng là số tổng hợp
+toàn hệ thống, một version cho từng truy vấn không có ý nghĩa gì.
 
 Version nằm **trong key** → bump không cần xóa key nào, TTL tự dọn key cũ.
 
@@ -530,14 +596,15 @@ khi status không đổi — và vì status hiếm khi đổi, cache hầu như 
 | Module | Test |
 |---|---:|
 | shared | 22 |
-| auth-service | 83 |
-| server-service | 175 |
-| monitor-service | 46 |
-| report-service | 65 |
+| auth-service | 85 |
+| server-service | 178 |
+| monitor-service | 53 |
+| report-service | 102 |
 | tcp-simulator | 15 |
-| **Tổng** | **406** |
+| **Tổng** | **455** |
 
-6/6 module: `go build` ✅ `go vet` ✅ `go test` ✅
+6/6 module: `go build` ✅ `go vet` ✅ `go test` ✅ (đo lại 24/07/2026 bằng
+`go test ./... -count=1`, đếm số hàm `Test*` ở cấp cao nhất)
 
 ### 11.3. Giới hạn của sqlmock
 
@@ -558,37 +625,71 @@ MONITOR_TEST_ES_URL="http://localhost:9200" go test ./internal/database/   -run 
 
 ## 12. Triển khai & vận hành
 
-### 12.1. Docker Compose
+### 12.1. Ba đích triển khai, cùng một bộ image
+
+| File | Dùng khi | Đặc điểm |
+|---|---|---|
+| `docker-compose.yml` | máy đơn, demo, dev toàn phần | build tại chỗ, 1 replica, secret trong `.env` |
+| `docker-compose.dev.yml` | chỉ cần hạ tầng, service chạy `go run` | `extends` 4 service hạ tầng |
+| `docker-stack.yml` | Swarm nhiều node | image từ registry, nhiều replica, Docker secret |
 
 ```bash
-docker compose up --build      # 10 container
+docker compose up -d --build   # 10 container
 make seed                      # 10.000 server vào server_db
 make rebuild-cache             # BẮT BUỘC sau seed/khôi phục
 ```
 
 ### 12.2. Container
 
-| Container | Port ra host | Ghi chú |
-|---|---|---|
-| `traefik` | **8080** | Lối vào duy nhất của API |
-| `web` | **3000** | Next.js |
-| `postgres` | 5432 | 3 database |
-| `redis` | 6379 | |
-| `elasticsearch` | 9200 | |
-| `tcp-simulator` | — | Giả lập 10.000 server |
-| `auth-service` | *expose 8081* | Không ra host |
-| `server-service` | *expose 8082* | Không ra host |
-| `monitor-service` | *expose 8083* | Không ra host |
-| `report-service` | *expose 8084* | Không ra host |
+| Container | Port ra host | Replica (stack) | Ghi chú |
+|---|---|:---:|---|
+| `traefik` | **8080** | 1 | Lối vào duy nhất của API |
+| `web` | **3000** | 1 | Next.js |
+| `postgres` | 5432 | 1 | 3 database; ghim vào manager node |
+| `redis` | 6379 | 1 | ghim vào manager node |
+| `elasticsearch` | 9200 | 1 | ghim vào manager node |
+| `tcp-simulator` | — | 1 | Giả lập 10.000 server |
+| `auth-service` | *expose 8081* | 2 | Không ra host |
+| `server-service` | *expose 8082* | 2 | Không ra host |
+| `monitor-service` | *expose 8083* | 3 | Không ra host |
+| `report-service` | *expose 8084* | 3 | Không ra host; **không có `container_name`** để `--scale` chạy được |
+
+Ba service hạ tầng và Traefik bị ghim vào manager node vì dùng named volume local
+(`postgres_data`, `redis_data`, `es_data`) và bind-mount config từ repo. Bản stack này
+scale **tầng ứng dụng**, không scale tầng dữ liệu.
+
+**Secret:** Compose đọc từ `.env`, Swarm mount vào `/run/secrets/`. Cầu nối là
+`shared/pkg/confighelper.GetStringSecret(name, fallback)` — nếu `<NAME>_FILE` được set và
+đọc được thì dùng nội dung file. Nhờ vậy không dòng code config nào phải biết mình đang
+chạy Compose hay Swarm.
 
 ### 12.3. Ghi chú vận hành
 
 | Việc | Lưu ý |
 |---|---|
 | Sau seed / khôi phục | **Luôn** `make rebuild-cache`. Thiếu marker `ready`, Monitoring bỏ qua **mọi** round |
+| Image service là **distroless** | Không shell, không `wget`/`curl`. Chẩn đoán phải gọi binary trực tiếp, hoặc đi từ container `traefik` (Alpine, có `wget`) |
+| `report-service` không có `container_name` | Dùng `docker compose exec report-service …`, không `docker exec vcs-sms-report …` |
 | Contract stream | `changed_at` phải RFC3339. Lệch format → consumer ACK rồi vứt **im lặng** |
-| Redis maxmemory | Dùng `volatile-lru` + AOF: chỉ cache/round (có TTL) mới bị evict. Counter, status, target, stream **không** TTL nên được bảo vệ. Không đổi sang `allkeys-lru` |
+| Redis maxmemory | Dùng `volatile-lru` + AOF: chỉ cache/round (có TTL) mới bị evict. Bộ đếm, status, target, `list:version`, stream **không** TTL nên được bảo vệ. Không đổi sang `allkeys-lru` |
+| `init.sql` chỉ chạy khi volume rỗng | Database đã tồn tại thì chạy `migrate_report_ha.sql` thủ công để có `cron_runs` |
 | Trước production | Set `SMTP_RECIPIENT_DOMAINS`, đổi `JWT_SECRET`, tắt `/register` |
+
+```bash
+# Đọc metrics của monitor (image distroless, không có wget)
+docker exec vcs-sms-traefik wget -qO- http://monitor-service:8083/metrics | grep vcs_monitor
+
+# Dựng lại target projection
+docker compose exec server-service /app/server-service rebuild-monitor-cache
+
+# Chạy lại snapshot một ngày
+docker exec vcs-sms-traefik wget -qO- --post-data='' \
+  http://report-service:8084/internal/snapshots/2026-07-23
+
+# Tra lịch sử cron
+docker exec vcs-sms-postgres psql -U vcs_admin -d report_db \
+  -c "SELECT job_name, run_date, state, owner, finished_at FROM cron_runs ORDER BY run_date DESC LIMIT 5;"
+```
 
 ---
 
@@ -630,15 +731,30 @@ xảy ra **trước hay sau** khi body lên dây → không phân biệt đượ
 | Import / Export Excel | ✅ |
 | Health check 10.000 server | ✅ đã verify thật với TCP Simulator |
 | Report + coverage + top 10 | ✅ |
-| Email | ✅ đường SMTP chạy tới bước AUTH; **cần App Password thật** |
-| JWT + RBAC scope | ✅ |
+| Email | ✅ **đã gửi thật qua Gmail SMTP** — `report_jobs.state = 'sent'`, có `smtp_message_id` |
+| JWT + RBAC scope | ✅ đã kiểm bằng tài khoản `viewer` thật (403 đúng chỗ) |
 | OpenAPI | ✅ |
-| Unit test | ✅ 406 test |
+| Unit test | ✅ 455 test |
 | Log file + rotate | ✅ |
 | Metrics | ✅ 7/7 |
-| ILM retention | ✅ |
+| ILM retention | ✅ policy `server-status-logs-retention` đang gắn vào các index thật |
 | Load test 10.001 server | ✅ round 3,5s, `checks_missing` 0 (xem §8.1) |
-| Multi-instance monitor | ⏳ **chưa chứng minh** |
+| HA report-service | ✅ `cron_runs` + heartbeat; `docker-stack.yml` chạy `replicas: 3` |
+| Multi-instance monitor | ⚠️ cơ chế đã có và `docker-stack.yml` khai báo `replicas: 3`, nhưng **chưa đo** trên nhiều instance cùng lúc |
+
+**Số đo trên hệ thống đang chạy (24/07/2026, Compose 1 instance mỗi service):**
+
+| Chỉ số | Giá trị |
+|---|---|
+| `vcs_monitor_targets_expected` | 10.000 |
+| `vcs_monitor_checks_missing` | 0 |
+| `vcs_monitor_queue_depth` | 0 (queue cạn trước khi round kết thúc) |
+| `GET /servers/stats` | 10.000 total — 8.910 ON / 1.090 OFF / 0 UNKNOWN |
+| `GET /servers/uptime` | `avg_uptime_pct` ≈ 89,6% cho ngày hiện tại |
+| Rebuild target projection | 1,8s |
+| Elasticsearch | 4 index ngày, 1,7–4,3 triệu doc/index, ILM 7 ngày đang áp |
+| `daily_snapshots` | 2 ngày × ~10.000 dòng |
+| `cron_runs` | `snapshot` và `daily_report` của 2026-07-23 đều `done` |
 
 ### 14.2. Điểm nhấn kiến trúc
 
@@ -646,20 +762,26 @@ xảy ra **trước hay sau** khi body lên dây → không phân biệt đượ
 2. **Lua script atomic** — không có cửa sổ nào Redis status và stream mâu thuẫn.
 3. **Version guard** — mọi apply idempotent, nhờ đó replay cả stream là an toàn.
 4. **`round_id` từ Redis TIME** — nhiều instance thống nhất mà không cần điều phối.
-5. **Snapshot 00:30** — ES chết không làm chết report, và là mắt xích cho ILM 7 ngày.
+5. **Snapshot hằng ngày** — ES chết không làm chết report, và là mắt xích cho ILM 7 ngày.
 6. **`uptime_pct` NULL chứ không 0** — không biến sự cố thu thập thành báo cáo sai.
 7. **Coverage phơi bày** — report nói ra phần nó không đo được.
 8. **Hai tầng bảo mật** — ForwardAuth trả lời "ai", `RequireScope` trả lời "được làm gì".
 9. **TCP Simulator** — giả lập 10.000 server bằng một container.
+10. **Cùng một bài toán, hai công cụ đúng nhịp** — Monitoring giành `SETNX` (nhịp 60 giây,
+    mất lock chỉ tốn 1 round); Report giành một dòng `cron_runs` (nhịp một ngày, cần bền và
+    cần lịch sử để kiểm tra sau).
+11. **Bộ đếm uptime reset theo ngày VN** — dashboard tự đúng lại mỗi ngày, không cần ai xoá
+    key thủ công.
 
 ### 14.3. Còn lại
 
 | # | Việc | Ghi chú |
 |---|---|---|
-| 1 | Email thật | Chỉ cần App Password 16 ký tự |
-| 2 | Load test 10.000 server | Cần đo: sizing worker, chi phí `top_hits`, thời gian import |
-| 3 | Multi-instance monitor | Chứng minh 2+ instance chia việc qua `BRPOP` |
-| 4 | Export 100 query / 10.000 server | Đánh đổi có chủ đích; chỉ sửa nếu đo thấy chậm thật |
+| 1 | Đo multi-instance monitor | Cơ chế đã có (`SETNX` + `BRPOP`); còn thiếu phép đo 2–3 instance cùng lúc để xác nhận `round_duration` giảm và `checks_missing` vẫn 0 |
+| 2 | Kiểm blacklist access token | `auth:blacklist:{jti}` được **ghi** khi logout nhưng `/internal/verify` chưa **đọc** → token đã logout còn dùng được tối đa 15 phút. Đánh đổi có ý thức (1 lệnh Redis × toàn bộ lưu lượng), nhưng nên ghi rõ hoặc bổ sung |
+| 3 | Export 100 query / 10.000 server | Đánh đổi có chủ đích (dùng lại `FindAll` của list API, cap `page_size` 100); chỉ sửa nếu đo thấy chậm thật |
+| 4 | Scale tầng dữ liệu | `docker-stack.yml` ghim Postgres/Redis/ES vào manager node vì volume local. Muốn HA thật cần replication hoặc volume driver dùng chung |
+| 5 | Dọn code chết | `internal/service/login_guard.go` (auth) trùng chức năng với `checkLoginAttempts`/`recordFailedAttempt` và **không ai gọi**; `Register` kiểm trùng email hai lần liên tiếp |
 
 ---
 

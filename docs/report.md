@@ -1,8 +1,31 @@
+> # ⛔ TÀI LIỆU ĐÃ LỖI THỜI — GIỮ LẠI LÀM LỊCH SỬ
+>
+> Tài liệu này mô tả kiến trúc **Checkpoint 1** và **không còn đúng với hệ thống hiện tại**.
+> Nó được giữ lại để đối chiếu quá trình refactor, không phải để tra cứu.
+>
+> **Bốn thay đổi lớn khiến tài liệu này sai:**
+>
+> | Bản này (Checkpoint 1) | Hệ thống hiện tại |
+> |---|---|
+> | **Kafka** cho event-driven | **Redis Stream** — 1 event, 1 producer, 1 consumer group |
+> | **API Gateway tự viết** | **Traefik** + ForwardAuth |
+> | **5 service** (có FileIO Service riêng) | **4 service** — import/export là adapter của server-service |
+> | **Shared schema** một database | **Database-per-service** — `identity_db`, `server_db`, `report_db` |
+>
+> **Hãy đọc thay thế:**
+> - [BaoCao-MoTa-ThietKe-HeThong.md](./BaoCao-MoTa-ThietKe-HeThong.md) — bản báo cáo thiết kế hiện hành
+> - [01-architecture-overview.md](./01-architecture-overview.md) — tổng quan kiến trúc
+> - [`.claude/diagrams/`](../.claude/diagrams/README.md) — bộ sơ đồ hệ thống
+>
+> *(Ghi chú thêm ngày 24/07/2026.)*
+
+---
+
 # BÁO CÁO DỰ ÁN: VCS SERVER MANAGEMENT SYSTEM (VCS-SMS)
 
 > **Chương trình đào tạo:** VCS Passport  
 > **Checkpoint:** 1  
-> **Phiên bản:** 1.0  
+> **Phiên bản:** 1.0 — ⛔ **đã bị thay thế, xem banner ở đầu file**  
 > **Ngày:** 2026-06-15  
 > **Tác giả:** Đặng Huy Chiêu Hoàng  
 > **Ngôn ngữ:** Go 1.24+  
